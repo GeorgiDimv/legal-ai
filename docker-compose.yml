@@ -1,0 +1,179 @@
+
+services:
+  # vLLM with Qwen3-32B-AWQ (tensor-parallel across 4 GPUs - 64 heads / 4 = 16)
+  llm:
+    image: vllm/vllm-openai:latest
+    ports:
+      - "8000:8000"
+    volumes:
+      - ~/.cache/huggingface:/root/.cache/huggingface
+    environment:
+      - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
+    command: >
+      --model Qwen/Qwen3-32B-AWQ
+      --tensor-parallel-size 4
+      --gpu-memory-utilization 0.85
+      --dtype auto
+      --max-model-len 4096
+      --quantization awq
+      --trust-remote-code
+      --max-num-seqs 8
+      --enforce-eager
+      --disable-custom-all-reduce
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 4
+              capabilities: [gpu]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 300s  # 5 min startup for model loading
+
+  # PaddleOCR Service (CPU mode - GPU used by LLM)
+  ocr:
+    build: ./services/ocr
+    ports:
+      - "8001:8001"
+    environment:
+      - USE_GPU=false
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Nominatim Geocoding (Bulgaria OSM data only)
+  nominatim:
+    image: mediagis/nominatim:4.4
+    ports:
+      - "8002:8080"
+    environment:
+      - PBF_URL=https://download.geofabrik.de/europe/bulgaria-latest.osm.pbf
+      - REPLICATION_URL=https://download.geofabrik.de/europe/bulgaria-updates/
+      - NOMINATIM_PASSWORD=${NOMINATIM_PASSWORD:-nominatim}
+      - IMPORT_STYLE=full
+    volumes:
+      - nominatim-data:/var/lib/postgresql/14/main
+    restart: unless-stopped
+    # First startup takes 30-60 min for Bulgaria data import
+
+  # Car Value Service (Mobile.bg scraper with DB fallback)
+  car_value:
+    build: ./services/car_value
+    ports:
+      - "8003:8003"
+    environment:
+      - REDIS_URL=redis://redis:6379
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-legal_ai}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/legal_ai
+    depends_on:
+      - redis
+      - postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8003/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Crash Physics Calculation Service
+  physics:
+    build: ./services/physics
+    ports:
+      - "8004:8004"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8004/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-legal_ai}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-changeme}
+      - POSTGRES_DB=legal_ai
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./database/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-legal_ai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # API Gateway (main entry point)
+  gateway:
+    build: ./services/gateway
+    ports:
+      - "80:80"
+    environment:
+      - LLM_URL=http://llm:8000
+      - OCR_URL=http://ocr:8001
+      - NOMINATIM_URL=http://nominatim:8080
+      - CAR_VALUE_URL=http://car_value:8003
+      - PHYSICS_URL=http://physics:8004
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-legal_ai}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/legal_ai
+      - REDIS_URL=redis://redis:6379
+      - REQUEST_TIMEOUT=300
+    depends_on:
+      - llm
+      - ocr
+      - nominatim
+      - car_value
+      - physics
+      - postgres
+      - redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Open WebUI - ChatGPT-like interface for testing the model
+  webui:
+    image: ghcr.io/open-webui/open-webui:main
+    ports:
+      - "3000:8080"
+    environment:
+      - OPENAI_API_BASE_URL=http://llm:8000/v1
+      - OPENAI_API_KEY=not-needed
+      - WEBUI_AUTH=false
+    volumes:
+      - webui-data:/app/backend/data
+    depends_on:
+      - llm
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  redis-data:
+  nominatim-data:
+  webui-data:
