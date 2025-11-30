@@ -38,7 +38,7 @@ Legal AI is a document processing pipeline for Bulgarian automotive insurance cl
 - **Physics** (`services/physics/`): Crash reconstruction using Momentum 360 and Impact Theory formulas
 - **Car Value** (`services/car_value/`): On-demand price scraper with VIN decoding (cars.bg + mobile.bg + NHTSA API)
 - **Nominatim**: Geocoding service with Bulgaria OSM data (returns lat/lon coordinates)
-- **PostgreSQL**: Stores processed claims and parts data
+- **PostgreSQL**: Stores processed claims
 - **Redis**: Caching layer for car values (24h TTL) and VIN decodes (permanent)
 
 ## Commands
@@ -108,8 +108,9 @@ docker compose build physics
 - `services/car_value/main.py`: On-demand scraper + VIN decoder (NHTSA API) with Redis caching
 - `services/physics/main.py`: Crash physics calculations (Momentum 360, Impact Theory)
 - `database/init.sql`: PostgreSQL schema and seed data
-- `database/migrations/002_price_aggregator.sql`: Parts tables for damage estimation
-- `database/migrations/003_drop_unused_price_tables.sql`: Cleanup migration (removes old price tables)
+- `database/migrations/002_price_aggregator.sql`: Legacy migration (tables dropped)
+- `database/migrations/003_drop_unused_price_tables.sql`: Cleanup migration (removes price tables)
+- `database/migrations/004_drop_car_parts.sql`: Removes parts table (using LLM damage estimates)
 
 ## API Endpoints
 
@@ -175,9 +176,9 @@ V1y = (m1*V1'*sin(β1) + m2*V2'*sin(β2)) / m1*sin(α1)
 V1 = sqrt(V1x² + V1y²)
 ```
 
-## Car Value Service (v3.0.0)
+## Car Value Service (v3.1.0)
 
-On-demand price scraper with VIN decoding:
+On-demand price scraper with VIN decoding (no database required):
 
 ### Data Flow
 1. **Check Redis cache** (24h TTL for prices, permanent for VIN)
@@ -192,8 +193,6 @@ On-demand price scraper with VIN decoding:
 | `GET /vin/{vin}` | Decode VIN via NHTSA API (make, model, year, country) |
 | `GET /value-by-vin/{vin}` | Decode VIN + lookup market value |
 | `GET /value/{make}/{model}/{year}` | Get car market value (on-demand scrape) |
-| `GET /parts/{make}/{category}` | Get parts prices by category |
-| `GET /parts/estimate-damage` | Estimate total repair cost |
 
 ### VIN Decoding
 - **Primary**: NHTSA vPIC API (free, no API key, works for EU vehicles)
@@ -203,27 +202,8 @@ On-demand price scraper with VIN decoding:
 ### Supported Makes
 BMW, Mercedes-Benz, Audi, Volkswagen, Toyota, Opel, Ford, Renault, Peugeot, Skoda, Honda, Mazda, Nissan, Volvo, Hyundai, Kia
 
-### Database Tables
-- `car_parts`: Parts pricing (OEM + aftermarket) with labor costs
-
-## Parts Valuation
-
-The system includes parts pricing for damage estimation:
-
-### Categories
-- `body`: Bumpers, doors, fenders, hood, trunk, mirrors, glass
-- `electrical`: Headlights, taillights, radiator, AC condenser
-- `suspension`: Shock absorbers, control arms
-- `engine`: Alternator, starter, water pump
-- `interior`: Seats, steering wheel, dashboard
-
-### Pricing
-- **OEM prices**: Original manufacturer parts
-- **Aftermarket prices**: Generic/third-party parts
-- **Labor hours**: Typical installation time
-- **Labor rate**: 50 BGN/hour default
-
-Premium makes (BMW, Mercedes-Benz) have higher part prices.
+### Damage Estimation
+Damage costs are extracted by the LLM from claim documents (`estimated_damage` field in vehicle data). No separate parts database is used.
 
 ## Notes
 

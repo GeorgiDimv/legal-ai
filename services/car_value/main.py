@@ -6,22 +6,18 @@ Features:
 1. VIN decoding via NHTSA API (free, works for EU vehicles)
 2. On-demand scraping from cars.bg, mobile.bg
 3. Redis caching (24h for prices, forever for VIN)
-4. Parts pricing from database
 """
 
 import os
 import re
 import json
 import logging
-import hashlib
-from typing import Optional, List, Dict
+from typing import Optional, List
 from datetime import datetime
 
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
 import httpx
 import redis
-import asyncpg
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -35,9 +31,6 @@ app = FastAPI(
 
 # Redis client for caching
 redis_client: Optional[redis.Redis] = None
-
-# PostgreSQL connection pool (only for parts)
-db_pool: Optional[asyncpg.Pool] = None
 
 # Cache TTL
 PRICE_CACHE_TTL = 86400  # 24 hours for prices
@@ -83,7 +76,7 @@ YEAR_CODES = {
 @app.on_event("startup")
 async def startup():
     """Initialize connections on startup."""
-    global redis_client, db_pool
+    global redis_client
 
     # Connect to Redis
     redis_url = os.environ.get("REDIS_URL", "redis://localhost:6379")
@@ -94,23 +87,6 @@ async def startup():
     except Exception as e:
         logger.warning(f"Redis connection failed: {e}")
         redis_client = None
-
-    # Connect to PostgreSQL (for parts only)
-    database_url = os.environ.get("DATABASE_URL")
-    if database_url:
-        try:
-            db_pool = await asyncpg.create_pool(database_url, min_size=1, max_size=5)
-            logger.info("Connected to PostgreSQL")
-        except Exception as e:
-            logger.warning(f"PostgreSQL connection failed: {e}")
-            db_pool = None
-
-
-@app.on_event("shutdown")
-async def shutdown():
-    """Cleanup connections on shutdown."""
-    if db_pool:
-        await db_pool.close()
 
 
 @app.get("/health")
@@ -126,9 +102,8 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "car_value",
-        "version": "3.0.0",
-        "redis": redis_ok,
-        "database": db_pool is not None
+        "version": "3.1.0",
+        "redis": redis_ok
     }
 
 
@@ -610,143 +585,17 @@ def cache_result(key: str, result: dict, ttl: int):
             logger.warning(f"Redis cache error: {e}")
 
 
-# =============================================================================
-# Parts Endpoints (kept from v2)
-# =============================================================================
-
-@app.get("/parts/{make}/{part_category}")
-async def get_parts_prices(make: str, part_category: str, model: Optional[str] = None):
-    """Get parts prices for a vehicle."""
-    if not db_pool:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    try:
-        async with db_pool.acquire() as conn:
-            if model:
-                rows = await conn.fetch("""
-                    SELECT part_name, part_name_bg, oem_price_bgn, aftermarket_price_bgn,
-                           labor_hours, labor_rate_bgn
-                    FROM car_parts
-                    WHERE (LOWER(make) = LOWER($1) OR make IS NULL)
-                      AND (LOWER(model) = LOWER($2) OR model IS NULL)
-                      AND LOWER(part_category) = LOWER($3)
-                    ORDER BY make DESC NULLS LAST, part_name
-                """, make, model, part_category)
-            else:
-                rows = await conn.fetch("""
-                    SELECT part_name, part_name_bg, oem_price_bgn, aftermarket_price_bgn,
-                           labor_hours, labor_rate_bgn
-                    FROM car_parts
-                    WHERE (LOWER(make) = LOWER($1) OR make IS NULL)
-                      AND LOWER(part_category) = LOWER($2)
-                    ORDER BY make DESC NULLS LAST, part_name
-                """, make, part_category)
-
-            if not rows:
-                rows = await conn.fetch("""
-                    SELECT part_name, part_name_bg, oem_price_bgn, aftermarket_price_bgn,
-                           labor_hours, labor_rate_bgn
-                    FROM car_parts
-                    WHERE make IS NULL AND LOWER(part_category) = LOWER($1)
-                """, part_category)
-
-            parts = []
-            for row in rows:
-                labor_cost = (row["labor_hours"] or 0) * (row["labor_rate_bgn"] or 50)
-                parts.append({
-                    "part_name": row["part_name"],
-                    "part_name_bg": row["part_name_bg"],
-                    "oem_price_bgn": row["oem_price_bgn"],
-                    "aftermarket_price_bgn": row["aftermarket_price_bgn"],
-                    "labor_hours": row["labor_hours"],
-                    "labor_cost_bgn": round(labor_cost, 2),
-                    "total_oem_bgn": round((row["oem_price_bgn"] or 0) + labor_cost, 2),
-                    "total_aftermarket_bgn": round((row["aftermarket_price_bgn"] or 0) + labor_cost, 2)
-                })
-
-            return {
-                "make": make,
-                "model": model,
-                "category": part_category,
-                "parts": parts,
-                "currency": "BGN"
-            }
-
-    except Exception as e:
-        logger.error(f"Parts lookup error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/parts/estimate-damage")
-async def estimate_damage_cost(
-    make: str,
-    parts: str,
-    use_oem: bool = False
-):
-    """Estimate total damage cost for multiple parts."""
-    if not db_pool:
-        raise HTTPException(status_code=503, detail="Database not available")
-
-    part_list = [p.strip() for p in parts.split(",")]
-
-    try:
-        async with db_pool.acquire() as conn:
-            total_parts = 0
-            total_labor = 0
-            breakdown = []
-
-            for part_name in part_list:
-                row = await conn.fetchrow("""
-                    SELECT part_name, oem_price_bgn, aftermarket_price_bgn,
-                           labor_hours, labor_rate_bgn
-                    FROM car_parts
-                    WHERE (LOWER(make) = LOWER($1) OR make IS NULL)
-                      AND LOWER(part_name) = LOWER($2)
-                    ORDER BY make DESC NULLS LAST
-                    LIMIT 1
-                """, make, part_name)
-
-                if row:
-                    price = row["oem_price_bgn"] if use_oem else row["aftermarket_price_bgn"]
-                    labor = (row["labor_hours"] or 0) * (row["labor_rate_bgn"] or 50)
-
-                    if price:
-                        total_parts += price
-                        total_labor += labor
-                        breakdown.append({
-                            "part": row["part_name"],
-                            "part_cost_bgn": price,
-                            "labor_cost_bgn": round(labor, 2)
-                        })
-
-            return {
-                "make": make,
-                "pricing_type": "OEM" if use_oem else "Aftermarket",
-                "parts_cost_bgn": round(total_parts, 2),
-                "labor_cost_bgn": round(total_labor, 2),
-                "total_cost_bgn": round(total_parts + total_labor, 2),
-                "breakdown": breakdown,
-                "currency": "BGN"
-            }
-
-    except Exception as e:
-        logger.error(f"Damage estimate error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "service": "Car Value Service",
-        "version": "3.0.0",
+        "version": "3.1.0",
         "description": "Bulgarian car market value + VIN decoder",
         "endpoints": {
             "/vin/{vin}": "Decode VIN to get vehicle info",
             "/value/{make}/{model}/{year}": "Get car market value",
-            "/value-by-vin/{vin}": "Get car value by VIN",
-            "/parts/{make}/{category}": "Get parts prices",
-            "/parts/estimate-damage": "Estimate damage repair cost"
+            "/value-by-vin/{vin}": "Get car value by VIN"
         }
     }
 
