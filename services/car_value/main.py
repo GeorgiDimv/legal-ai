@@ -960,9 +960,9 @@ async def search_autoprofi_bg(make: str, model: str, year: int, part_bg: str) ->
     AutoProfi.bg is a Sofia-based auto parts store with OEM and aftermarket parts.
     """
     try:
-        # AutoProfi.bg search URL
+        # AutoProfi.bg search URL - uses /products/search path
         query = f"{part_bg} {make}"
-        search_url = f"https://autoprofi.bg/search?q={quote_plus(query)}"
+        search_url = f"https://autoprofi.bg/products/search?search={quote_plus(query)}"
 
         headers = {
             "User-Agent": USER_AGENT,
