@@ -613,7 +613,7 @@ async def process_text(input_data: TextInput):
     if len(vehicles) >= 2 and vehicles[0].mass_kg and vehicles[1].mass_kg:
         try:
             physics_result = await calculate_momentum_360(
-                vehicles[0], vehicles[1], collision_details
+                vehicles[0].model_dump(), vehicles[1].model_dump(), collision_details
             )
             if physics_result:
                 physics_data = PhysicsAnalysis(**physics_result)
