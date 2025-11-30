@@ -39,7 +39,7 @@ Extract the following information and return as valid JSON:
       "insurance_company": "insurance company name",
       "policy_number": "insurance policy number",
       "damage_description": "description of damage in English",
-      "damaged_parts": ["list of specific damaged parts e.g. front bumper, headlight left, hood"],
+      "damaged_parts": ["REQUIRED: extract each damaged part as separate item e.g. front bumper, headlight left, hood, door, fender"],
       "estimated_damage": float amount in BGN,
       "skid_distance_m": float length of skid marks in meters or null,
       "post_impact_travel_m": float distance traveled after impact (σ) in meters or null,
@@ -104,8 +104,9 @@ Important instructions:
 11. post_impact_angle_deg (β) = direction vehicle traveled AFTER collision
 12. If angles are described as "heading north" use 90°, "heading east" use 0°, etc.
 13. For head-on collisions: vehicle 1 α≈0°, vehicle 2 α≈180° typically
-14. VIN (Vehicle Identification Number) is exactly 17 characters (letters A-H,J-N,P,R-Z and digits 0-9, excludes I,O,Q)
-15. VIN may appear as "VIN:", "Рама №", "Шаси №", or similar in Bulgarian documents
+14. IMPORTANT: Always extract VIN if present - it is exactly 17 characters (e.g. WVWZZZ1KZAW123456)
+15. VIN may appear as "VIN:", "Рама №", "Шаси №" in documents - ALWAYS include it if found
+16. IMPORTANT: Always extract damaged_parts as a list - parse damage description into individual parts
 
 JSON Response:"""
 
