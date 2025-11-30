@@ -14,7 +14,7 @@ services:
       --tensor-parallel-size 4
       --gpu-memory-utilization 0.85
       --dtype auto
-      --max-model-len 4096
+      --max-model-len 8192
       --quantization awq_marlin
       --trust-remote-code
       --max-num-seqs 8

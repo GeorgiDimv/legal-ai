@@ -115,7 +115,7 @@ async def extract_with_llm(
     client: AsyncOpenAI,
     model: str,
     document_text: str,
-    max_tokens: int = 1800
+    max_tokens: int = 4000
 ) -> dict:
     """
     Extract structured data from document text using LLM.
