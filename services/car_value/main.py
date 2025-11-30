@@ -1,19 +1,22 @@
 """
-Car Value Service - On-Demand Price Lookup + VIN Decoding
+Car Value Service - On-Demand Price Lookup + VIN Decoding + Parts Search
 Provides current market values for Bulgarian car insurance claims
 
 Features:
 1. VIN decoding via NHTSA API (free, works for EU vehicles)
 2. On-demand scraping from cars.bg, mobile.bg
 3. Redis caching (24h for prices, forever for VIN)
+4. Parts pricing via web search (autodoc.bg, autopower.bg, alo.bg)
 """
 
 import os
 import re
 import json
 import logging
-from typing import Optional, List
+import asyncio
+from typing import Optional, List, Dict
 from datetime import datetime
+from urllib.parse import quote_plus
 
 from fastapi import FastAPI, HTTPException
 import httpx
@@ -25,8 +28,8 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Car Value Service",
-    description="Bulgarian car market value + VIN decoder",
-    version="3.0.0"
+    description="Bulgarian car market value + VIN decoder + parts pricing",
+    version="3.2.0"
 )
 
 # Redis client for caching
@@ -34,6 +37,7 @@ redis_client: Optional[redis.Redis] = None
 
 # Cache TTL
 PRICE_CACHE_TTL = 86400  # 24 hours for prices
+PARTS_CACHE_TTL = 86400  # 24 hours for parts
 VIN_CACHE_TTL = 0  # Forever for VIN (they don't change)
 
 # Current year
@@ -102,7 +106,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "car_value",
-        "version": "3.1.0",
+        "version": "3.2.0",
         "redis": redis_ok
     }
 
@@ -585,17 +589,416 @@ def cache_result(key: str, result: dict, ttl: int):
             logger.warning(f"Redis cache error: {e}")
 
 
+# =============================================================================
+# Parts Search - Real-time web scraping for parts prices
+# =============================================================================
+
+# Part name translations (English -> Bulgarian)
+PART_TRANSLATIONS = {
+    # Body parts
+    "front bumper": "предна броня",
+    "rear bumper": "задна броня",
+    "hood": "преден капак",
+    "bonnet": "преден капак",
+    "trunk": "заден капак",
+    "trunk lid": "заден капак",
+    "front fender": "преден калник",
+    "rear fender": "заден калник",
+    "front door": "предна врата",
+    "rear door": "задна врата",
+    "side mirror": "странично огледало",
+    "wing mirror": "странично огледало",
+    "windshield": "предно стъкло",
+    "windscreen": "предно стъкло",
+    "rear window": "задно стъкло",
+    "door handle": "дръжка за врата",
+    "grille": "решетка",
+    "front grille": "предна решетка",
+    # Lights
+    "headlight": "фар",
+    "headlamp": "фар",
+    "taillight": "стоп",
+    "tail light": "стоп",
+    "rear light": "заден стоп",
+    "fog light": "халоген",
+    "turn signal": "мигач",
+    "indicator": "мигач",
+    # Mechanical
+    "radiator": "радиатор",
+    "condenser": "климатичен кондензатор",
+    "ac condenser": "климатичен кондензатор",
+    "alternator": "алтернатор",
+    "starter": "стартер",
+    "water pump": "водна помпа",
+    "shock absorber": "амортисьор",
+    "strut": "амортисьор",
+    "control arm": "носач",
+    "brake disc": "спирачен диск",
+    "brake pad": "накладки",
+    "brake caliper": "спирачен апарат",
+    # Interior
+    "steering wheel": "волан",
+    "dashboard": "табло",
+    "seat": "седалка",
+    "airbag": "еърбег",
+}
+
+
+def translate_part_name(part_name: str) -> str:
+    """Translate English part name to Bulgarian."""
+    part_lower = part_name.lower().strip()
+
+    # Direct match
+    if part_lower in PART_TRANSLATIONS:
+        return PART_TRANSLATIONS[part_lower]
+
+    # Partial match
+    for eng, bg in PART_TRANSLATIONS.items():
+        if eng in part_lower or part_lower in eng:
+            return bg
+
+    # Return original if no translation
+    return part_name
+
+
+from pydantic import BaseModel
+
+class PartsSearchRequest(BaseModel):
+    """Request body for parts search."""
+    make: str
+    model: str
+    year: int
+    parts: List[str]
+    include_labor: bool = True
+
+
+@app.post("/parts/search")
+async def search_parts_prices(request: PartsSearchRequest):
+    """
+    Search for parts prices across Bulgarian auto parts websites.
+
+    Uses web scraping to find real-time prices from:
+    - autopower.bg (OEM and aftermarket)
+    - alo.bg (used parts marketplace)
+    - mobile.bg parts section
+
+    Args:
+        request: PartsSearchRequest with make, model, year, parts list
+
+    Returns:
+        Parts breakdown with prices and sources
+    """
+    make = request.make
+    model = request.model
+    year = request.year
+    parts = request.parts
+    include_labor = request.include_labor
+
+    results = []
+    total_parts_cost = 0
+    total_labor_cost = 0
+
+    # Labor rates (BGN per hour) - varies by part complexity
+    LABOR_RATES = {
+        "bumper": {"hours": 2.5, "rate": 50},
+        "броня": {"hours": 2.5, "rate": 50},
+        "fender": {"hours": 2.0, "rate": 50},
+        "калник": {"hours": 2.0, "rate": 50},
+        "door": {"hours": 2.5, "rate": 50},
+        "врата": {"hours": 2.5, "rate": 50},
+        "hood": {"hours": 1.5, "rate": 50},
+        "капак": {"hours": 1.5, "rate": 50},
+        "headlight": {"hours": 1.0, "rate": 50},
+        "фар": {"hours": 1.0, "rate": 50},
+        "taillight": {"hours": 0.5, "rate": 50},
+        "стоп": {"hours": 0.5, "rate": 50},
+        "mirror": {"hours": 0.5, "rate": 50},
+        "огледало": {"hours": 0.5, "rate": 50},
+        "windshield": {"hours": 2.0, "rate": 60},
+        "стъкло": {"hours": 2.0, "rate": 60},
+        "radiator": {"hours": 2.5, "rate": 50},
+        "радиатор": {"hours": 2.5, "rate": 50},
+        "shock": {"hours": 1.5, "rate": 50},
+        "амортисьор": {"hours": 1.5, "rate": 50},
+    }
+
+    for part_name in parts:
+        # Check cache first
+        cache_key = f"part:{make.lower()}:{model.lower()}:{year}:{part_name.lower()}"
+
+        if redis_client:
+            try:
+                cached = redis_client.get(cache_key)
+                if cached:
+                    logger.info(f"Parts cache hit: {cache_key}")
+                    part_result = json.loads(cached)
+                    part_result["from_cache"] = True
+                    results.append(part_result)
+                    if part_result.get("best_price_bgn"):
+                        total_parts_cost += part_result["best_price_bgn"]
+                    if part_result.get("labor_cost_bgn"):
+                        total_labor_cost += part_result["labor_cost_bgn"]
+                    continue
+            except Exception as e:
+                logger.warning(f"Redis read error: {e}")
+
+        # Translate to Bulgarian for better search results
+        part_bg = translate_part_name(part_name)
+
+        # Search multiple sources in parallel
+        search_results = await search_part_prices(make, model, year, part_name, part_bg)
+
+        # Calculate labor cost
+        labor_cost = 0
+        if include_labor:
+            for keyword, labor_info in LABOR_RATES.items():
+                if keyword in part_name.lower() or keyword in part_bg.lower():
+                    labor_cost = labor_info["hours"] * labor_info["rate"]
+                    break
+            if labor_cost == 0:
+                labor_cost = 1.5 * 50  # Default: 1.5 hours at 50 BGN
+
+        part_result = {
+            "part_name": part_name,
+            "part_name_bg": part_bg,
+            "search_results": search_results,
+            "best_price_bgn": None,
+            "best_source": None,
+            "price_range": None,
+            "labor_cost_bgn": labor_cost if include_labor else None,
+        }
+
+        # Find best price
+        all_prices = []
+        for source, data in search_results.items():
+            if data.get("prices"):
+                all_prices.extend([(p, source) for p in data["prices"]])
+
+        if all_prices:
+            all_prices.sort(key=lambda x: x[0])
+            part_result["best_price_bgn"] = all_prices[0][0]
+            part_result["best_source"] = all_prices[0][1]
+            part_result["price_range"] = {
+                "min_bgn": all_prices[0][0],
+                "max_bgn": all_prices[-1][0],
+                "avg_bgn": round(sum(p[0] for p in all_prices) / len(all_prices), 2)
+            }
+            total_parts_cost += part_result["best_price_bgn"]
+
+        if labor_cost:
+            total_labor_cost += labor_cost
+
+        # Cache result
+        if redis_client and part_result.get("best_price_bgn"):
+            try:
+                redis_client.setex(cache_key, PARTS_CACHE_TTL, json.dumps(part_result))
+            except Exception as e:
+                logger.warning(f"Redis cache error: {e}")
+
+        results.append(part_result)
+
+    return {
+        "make": make,
+        "model": model,
+        "year": year,
+        "parts": results,
+        "summary": {
+            "total_parts_cost_bgn": round(total_parts_cost, 2),
+            "total_labor_cost_bgn": round(total_labor_cost, 2),
+            "total_repair_cost_bgn": round(total_parts_cost + total_labor_cost, 2),
+            "parts_found": sum(1 for r in results if r.get("best_price_bgn")),
+            "parts_not_found": sum(1 for r in results if not r.get("best_price_bgn")),
+        },
+        "currency": "BGN",
+        "note": "Prices are estimates from online sources. Actual prices may vary."
+    }
+
+
+async def search_part_prices(make: str, model: str, year: int, part_en: str, part_bg: str) -> Dict:
+    """Search multiple sources for part prices."""
+    results = {}
+
+    # Run searches in parallel
+    tasks = [
+        search_autopower(make, model, year, part_bg),
+        search_alo_bg(make, model, year, part_bg),
+        search_mobile_bg_parts(make, model, year, part_bg),
+    ]
+
+    search_results = await asyncio.gather(*tasks, return_exceptions=True)
+
+    sources = ["autopower.bg", "alo.bg", "mobile.bg"]
+    for source, result in zip(sources, search_results):
+        if isinstance(result, Exception):
+            logger.error(f"Search error for {source}: {result}")
+            results[source] = {"error": str(result), "prices": []}
+        else:
+            results[source] = result
+
+    return results
+
+
+async def search_autopower(make: str, model: str, year: int, part_bg: str) -> Dict:
+    """Search autopower.bg for parts."""
+    try:
+        # Build search query
+        query = f"{part_bg} {make} {model}"
+        search_url = f"https://www.autopower.bg/search?q={quote_plus(query)}"
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8",
+        }
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(search_url, headers=headers)
+
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}", "prices": []}
+
+            html = resp.text
+            prices = []
+
+            # Extract prices (format: "1 234 лв" or "1234 лв" or "€123")
+            # autopower.bg uses various formats
+            for match in re.findall(r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:лв|BGN)', html):
+                try:
+                    price = int(match.replace(' ', '').replace('\xa0', ''))
+                    if 10 < price < 50000:  # Parts typically 10-50000 BGN
+                        prices.append(price)
+                except:
+                    continue
+
+            # Also check for EUR prices
+            for match in re.findall(r'€\s*(\d{1,3}(?:[\s\xa0]?\d{3})*)', html):
+                try:
+                    price_eur = int(match.replace(' ', '').replace('\xa0', ''))
+                    price_bgn = int(price_eur * 1.96)
+                    if 10 < price_bgn < 50000:
+                        prices.append(price_bgn)
+                except:
+                    continue
+
+            # Deduplicate and sort
+            prices = sorted(list(set(prices)))
+
+            return {
+                "prices": prices[:10],  # Top 10 prices
+                "count": len(prices),
+                "url": search_url
+            }
+
+    except Exception as e:
+        logger.error(f"autopower.bg error: {e}")
+        return {"error": str(e), "prices": []}
+
+
+async def search_alo_bg(make: str, model: str, year: int, part_bg: str) -> Dict:
+    """Search alo.bg for used parts."""
+    try:
+        # alo.bg search URL
+        query = f"{part_bg} {make}"
+        search_url = f"https://www.alo.bg/obiavi/?q={quote_plus(query)}"
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "bg-BG,bg;q=0.9",
+        }
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(search_url, headers=headers)
+
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}", "prices": []}
+
+            html = resp.text
+            prices = []
+
+            # alo.bg price format: "цена: 123 лв" or just "123 лв"
+            for match in re.findall(r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:лв|лева|BGN)', html, re.IGNORECASE):
+                try:
+                    price = int(match.replace(' ', '').replace('\xa0', ''))
+                    if 10 < price < 30000:  # Used parts typically cheaper
+                        prices.append(price)
+                except:
+                    continue
+
+            prices = sorted(list(set(prices)))
+
+            return {
+                "prices": prices[:10],
+                "count": len(prices),
+                "url": search_url,
+                "type": "used"  # Mark as used parts
+            }
+
+    except Exception as e:
+        logger.error(f"alo.bg error: {e}")
+        return {"error": str(e), "prices": []}
+
+
+async def search_mobile_bg_parts(make: str, model: str, year: int, part_bg: str) -> Dict:
+    """Search mobile.bg parts section."""
+    try:
+        # mobile.bg auto parts section
+        query = f"{part_bg} {make}"
+        search_url = f"https://www.mobile.bg/obiavi/avto-chasti-aksesori/?q={quote_plus(query)}"
+
+        headers = {
+            "User-Agent": USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml",
+            "Accept-Language": "bg-BG,bg;q=0.9",
+        }
+
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
+            resp = await client.get(search_url, headers=headers)
+
+            if resp.status_code != 200:
+                return {"error": f"HTTP {resp.status_code}", "prices": []}
+
+            try:
+                html = resp.content.decode('windows-1251')
+            except:
+                html = resp.text
+
+            prices = []
+
+            # Extract prices
+            for match in re.findall(r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:лв|BGN)', html):
+                try:
+                    price = int(match.replace(' ', '').replace('\xa0', ''))
+                    if 10 < price < 50000:
+                        prices.append(price)
+                except:
+                    continue
+
+            prices = sorted(list(set(prices)))
+
+            return {
+                "prices": prices[:10],
+                "count": len(prices),
+                "url": search_url
+            }
+
+    except Exception as e:
+        logger.error(f"mobile.bg parts error: {e}")
+        return {"error": str(e), "prices": []}
+
+
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "service": "Car Value Service",
-        "version": "3.1.0",
-        "description": "Bulgarian car market value + VIN decoder",
+        "version": "3.2.0",
+        "description": "Bulgarian car market value + VIN decoder + parts pricing",
         "endpoints": {
             "/vin/{vin}": "Decode VIN to get vehicle info",
             "/value/{make}/{model}/{year}": "Get car market value",
-            "/value-by-vin/{vin}": "Get car value by VIN"
+            "/value-by-vin/{vin}": "Get car value by VIN",
+            "/parts/search": "Search for parts prices (POST with make, model, year, parts[])"
         }
     }
 

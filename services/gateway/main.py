@@ -33,7 +33,9 @@ from schemas import (
     PoliceReportData,
     SettlementRecommendation,
     SettlementComponents,
-    PhysicsAnalysis
+    PhysicsAnalysis,
+    PartsEstimate,
+    PartPricing
 )
 from extractors import extract_with_llm, validate_extraction
 
@@ -206,10 +208,13 @@ async def process_document(file: UploadFile = File(...)):
                     city=loc.get("city")
                 )
 
-    # Step 4: Car value enrichment
+    # Step 4: Car value enrichment + Parts pricing
     vehicles = []
     for v in extracted.get("vehicles", []):
+        damaged_parts = v.get("damaged_parts", [])
+
         vehicle = VehicleData(
+            vin=v.get("vin"),
             registration=v.get("registration"),
             make=v.get("make"),
             model=v.get("model"),
@@ -219,6 +224,7 @@ async def process_document(file: UploadFile = File(...)):
             insurance_company=v.get("insurance_company"),
             policy_number=v.get("policy_number"),
             damage_description=v.get("damage_description"),
+            damaged_parts=damaged_parts,
             estimated_damage_bgn=v.get("estimated_damage"),
             skid_distance_m=v.get("skid_distance_m"),
             post_impact_travel_m=v.get("post_impact_travel_m"),
@@ -236,6 +242,39 @@ async def process_document(file: UploadFile = File(...)):
                     vehicle.market_value_source = value_data.get("source")
             except Exception as e:
                 logger.warning(f"Car value lookup failed: {e}")
+
+            # Search for parts prices if we have damaged parts
+            if damaged_parts:
+                try:
+                    parts_data = await search_parts_prices(
+                        vehicle.make, vehicle.model, vehicle.year, damaged_parts
+                    )
+                    if parts_data and parts_data.get("summary"):
+                        summary = parts_data["summary"]
+                        parts_list = []
+                        for p in parts_data.get("parts", []):
+                            parts_list.append(PartPricing(
+                                part_name=p.get("part_name"),
+                                part_name_bg=p.get("part_name_bg"),
+                                best_price_bgn=p.get("best_price_bgn"),
+                                best_source=p.get("best_source"),
+                                price_range_min_bgn=p.get("price_range", {}).get("min_bgn") if p.get("price_range") else None,
+                                price_range_max_bgn=p.get("price_range", {}).get("max_bgn") if p.get("price_range") else None,
+                                labor_cost_bgn=p.get("labor_cost_bgn"),
+                                total_cost_bgn=(p.get("best_price_bgn") or 0) + (p.get("labor_cost_bgn") or 0) if p.get("best_price_bgn") else None
+                            ))
+                        vehicle.parts_estimate = PartsEstimate(
+                            parts=parts_list,
+                            total_parts_cost_bgn=summary.get("total_parts_cost_bgn"),
+                            total_labor_cost_bgn=summary.get("total_labor_cost_bgn"),
+                            total_repair_cost_bgn=summary.get("total_repair_cost_bgn"),
+                            parts_found=summary.get("parts_found", 0),
+                            parts_not_found=summary.get("parts_not_found", 0),
+                            source="web_search"
+                        )
+                        logger.info(f"Parts estimate: {summary.get('total_repair_cost_bgn')} BGN for {len(damaged_parts)} parts")
+                except Exception as e:
+                    logger.warning(f"Parts search failed: {e}")
 
         vehicles.append(vehicle)
 
@@ -685,6 +724,46 @@ async def get_car_value(make: str, model: str, year: int) -> dict:
             return response.json()
 
     return {"error": "Value lookup failed"}
+
+
+async def search_parts_prices(make: str, model: str, year: int, parts: list) -> dict:
+    """
+    Search for parts prices using web scraping.
+
+    Args:
+        make: Vehicle make (e.g., "BMW")
+        model: Vehicle model (e.g., "320i")
+        year: Vehicle year
+        parts: List of damaged part names
+
+    Returns:
+        Parts pricing data from car_value service
+    """
+    if not parts:
+        return None
+
+    try:
+        async with httpx.AsyncClient(timeout=60) as client:  # Longer timeout for web scraping
+            response = await client.post(
+                f"{CAR_VALUE_URL}/parts/search",
+                json={
+                    "make": make,
+                    "model": model,
+                    "year": year,
+                    "parts": parts,
+                    "include_labor": True
+                }
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning(f"Parts search returned {response.status_code}: {response.text}")
+
+    except Exception as e:
+        logger.warning(f"Parts search failed: {e}")
+
+    return None
 
 
 async def validate_speed_with_physics(

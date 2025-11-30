@@ -15,6 +15,29 @@ class LocationData(BaseModel):
     longitude: Optional[float] = None
 
 
+class PartPricing(BaseModel):
+    """Pricing data for a damaged part."""
+    part_name: str
+    part_name_bg: Optional[str] = None
+    best_price_bgn: Optional[float] = None
+    best_source: Optional[str] = None
+    price_range_min_bgn: Optional[float] = None
+    price_range_max_bgn: Optional[float] = None
+    labor_cost_bgn: Optional[float] = None
+    total_cost_bgn: Optional[float] = None
+
+
+class PartsEstimate(BaseModel):
+    """Parts pricing estimate from web search."""
+    parts: List[PartPricing] = Field(default_factory=list)
+    total_parts_cost_bgn: Optional[float] = None
+    total_labor_cost_bgn: Optional[float] = None
+    total_repair_cost_bgn: Optional[float] = None
+    parts_found: int = 0
+    parts_not_found: int = 0
+    source: str = "web_search"
+
+
 class VehicleData(BaseModel):
     """Vehicle information from claim document."""
     vin: Optional[str] = Field(None, description="17-character Vehicle Identification Number")
@@ -27,7 +50,9 @@ class VehicleData(BaseModel):
     insurance_company: Optional[str] = None
     policy_number: Optional[str] = None
     damage_description: Optional[str] = None
-    estimated_damage_bgn: Optional[float] = None
+    damaged_parts: List[str] = Field(default_factory=list, description="List of damaged parts extracted from description")
+    estimated_damage_bgn: Optional[float] = Field(None, description="LLM estimate from document")
+    parts_estimate: Optional[PartsEstimate] = Field(None, description="Web-scraped parts pricing")
     current_market_value_bgn: Optional[float] = None
     market_value_source: Optional[str] = None
     # Physics data

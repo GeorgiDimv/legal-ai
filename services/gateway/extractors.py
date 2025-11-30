@@ -39,6 +39,7 @@ Extract the following information and return as valid JSON:
       "insurance_company": "insurance company name",
       "policy_number": "insurance policy number",
       "damage_description": "description of damage in English",
+      "damaged_parts": ["list of specific damaged parts e.g. front bumper, headlight left, hood"],
       "estimated_damage": float amount in BGN,
       "skid_distance_m": float length of skid marks in meters or null,
       "post_impact_travel_m": float distance traveled after impact (σ) in meters or null,

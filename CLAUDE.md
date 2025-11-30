@@ -176,13 +176,13 @@ V1y = (m1*V1'*sin(β1) + m2*V2'*sin(β2)) / m1*sin(α1)
 V1 = sqrt(V1x² + V1y²)
 ```
 
-## Car Value Service (v3.1.0)
+## Car Value Service (v3.2.0)
 
-On-demand price scraper with VIN decoding (no database required):
+On-demand price scraper with VIN decoding and parts pricing (no database required):
 
 ### Data Flow
-1. **Check Redis cache** (24h TTL for prices, permanent for VIN)
-2. **Live scrape cars.bg** (primary source)
+1. **Check Redis cache** (24h TTL for prices/parts, permanent for VIN)
+2. **Live scrape cars.bg** (primary source for vehicle values)
 3. **Live scrape mobile.bg** (backup source)
 4. **Return vehicle info only** if scraping fails (no static fallback)
 
@@ -193,17 +193,29 @@ On-demand price scraper with VIN decoding (no database required):
 | `GET /vin/{vin}` | Decode VIN via NHTSA API (make, model, year, country) |
 | `GET /value-by-vin/{vin}` | Decode VIN + lookup market value |
 | `GET /value/{make}/{model}/{year}` | Get car market value (on-demand scrape) |
+| `POST /parts/search` | Search for parts prices across Bulgarian websites |
 
 ### VIN Decoding
 - **Primary**: NHTSA vPIC API (free, no API key, works for EU vehicles)
 - **Fallback**: Local WMI decode (manufacturer + country from first 3 chars)
 - **Cache**: Permanent Redis cache (VINs don't change)
 
+### Parts Pricing (NEW)
+LLM extracts `damaged_parts` list from claim documents, then gateway calls `/parts/search` to get real-time prices:
+- **autopower.bg**: OEM and aftermarket parts
+- **alo.bg**: Used parts marketplace
+- **mobile.bg**: Auto parts section
+
+Parts search includes automatic translation (English → Bulgarian) and labor cost estimation.
+
 ### Supported Makes
 BMW, Mercedes-Benz, Audi, Volkswagen, Toyota, Opel, Ford, Renault, Peugeot, Skoda, Honda, Mazda, Nissan, Volvo, Hyundai, Kia
 
 ### Damage Estimation
-Damage costs are extracted by the LLM from claim documents (`estimated_damage` field in vehicle data). No separate parts database is used.
+1. LLM extracts `estimated_damage` from document (if mentioned)
+2. LLM extracts `damaged_parts` list (e.g., ["front bumper", "headlight left"])
+3. Gateway searches Bulgarian websites for real-time parts prices
+4. Returns both LLM estimate and web-scraped parts breakdown
 
 ## Notes
 
