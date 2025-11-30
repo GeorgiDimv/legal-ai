@@ -23,7 +23,6 @@ ENV/
 data/
 *.pdf
 *.xlsx
-!l.xlsx
 
 # Docker volumes
 postgres_data/
