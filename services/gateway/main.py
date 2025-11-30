@@ -37,7 +37,7 @@ from schemas import (
     PartsEstimate,
     PartPricing
 )
-from extractors import extract_with_llm, validate_extraction
+from extractors import extract_with_llm, validate_extraction, enrich_extraction_with_fallback
 
 # Configure logging
 logging.basicConfig(
@@ -182,6 +182,10 @@ async def process_document(file: UploadFile = File(...)):
         extracted = await extract_with_llm(llm_client, LLM_MODEL, raw_text)
         extracted, validation_warnings = validate_extraction(extracted)
         warnings.extend(validation_warnings)
+        # Fallback extraction for VINs and parts if LLM missed them
+        extracted, fallback_info = enrich_extraction_with_fallback(extracted, raw_text)
+        for info in fallback_info:
+            logger.info(info)
         logger.info(f"LLM extraction complete, confidence: {extracted.get('confidence_score', 0)}")
     except Exception as e:
         logger.error(f"LLM extraction failed: {e}")
@@ -502,6 +506,10 @@ async def process_text(input_data: TextInput):
         extracted = await extract_with_llm(llm_client, LLM_MODEL, raw_text)
         extracted, validation_warnings = validate_extraction(extracted)
         warnings.extend(validation_warnings)
+        # Fallback extraction for VINs and parts if LLM missed them
+        extracted, fallback_info = enrich_extraction_with_fallback(extracted, raw_text)
+        for info in fallback_info:
+            logger.info(info)
         logger.info(f"LLM extraction complete, confidence: {extracted.get('confidence_score', 0)}")
     except Exception as e:
         logger.error(f"LLM extraction failed: {e}")
@@ -529,10 +537,13 @@ async def process_text(input_data: TextInput):
                     city=loc.get("city")
                 )
 
-    # Step 3: Enrich vehicles with market values
+    # Step 3: Enrich vehicles with market values and parts pricing
     vehicles = []
     for v in extracted.get("vehicles", []):
+        damaged_parts = v.get("damaged_parts", [])
+
         vehicle = VehicleData(
+            vin=v.get("vin"),
             registration=v.get("registration"),
             make=v.get("make"),
             model=v.get("model"),
@@ -542,6 +553,7 @@ async def process_text(input_data: TextInput):
             insurance_company=v.get("insurance_company"),
             policy_number=v.get("policy_number"),
             damage_description=v.get("damage_description"),
+            damaged_parts=damaged_parts,
             estimated_damage_bgn=v.get("estimated_damage"),
             skid_distance_m=v.get("skid_distance_m"),
             post_impact_travel_m=v.get("post_impact_travel_m"),
@@ -550,6 +562,7 @@ async def process_text(input_data: TextInput):
             post_impact_angle_deg=v.get("post_impact_angle_deg")
         )
 
+        # Lookup market value
         if v.get("make") and v.get("model") and v.get("year"):
             try:
                 market_value = await get_car_value(v["make"], v["model"], v["year"])
@@ -557,6 +570,34 @@ async def process_text(input_data: TextInput):
                 vehicle.market_value_source = market_value.get("source")
             except Exception as e:
                 logger.warning(f"Car value lookup failed: {e}")
+
+            # Search for parts prices if we have damaged parts
+            if damaged_parts:
+                try:
+                    parts_data = await search_parts_prices(
+                        vehicle.make, vehicle.model, vehicle.year, damaged_parts
+                    )
+                    if parts_data and parts_data.get("summary"):
+                        summary = parts_data["summary"]
+                        parts_list = []
+                        for p in parts_data.get("parts", []):
+                            parts_list.append(PartPricing(
+                                part_name=p.get("part_name"),
+                                part_name_bg=p.get("part_name_bg"),
+                                best_price_bgn=p.get("best_price_bgn"),
+                                price_range=p.get("price_range"),
+                                source=p.get("source"),
+                                listings_found=p.get("listings_found", 0)
+                            ))
+                        vehicle.parts_estimate = PartsEstimate(
+                            total_parts_cost_bgn=summary.get("total_parts_cost_bgn"),
+                            labor_estimate_bgn=summary.get("labor_estimate_bgn"),
+                            total_repair_estimate_bgn=summary.get("total_repair_estimate_bgn"),
+                            parts=parts_list
+                        )
+                        logger.info(f"Parts estimate: {summary.get('total_repair_estimate_bgn')} BGN")
+                except Exception as e:
+                    logger.warning(f"Parts pricing failed: {e}")
 
         vehicles.append(vehicle)
 

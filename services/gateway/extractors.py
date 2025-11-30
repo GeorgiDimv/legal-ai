@@ -335,3 +335,136 @@ def validate_extraction(data: dict) -> tuple[dict, list]:
             settlement["amount_bgn"] = None
 
     return data, warnings
+
+
+def extract_vins_from_text(text: str) -> list[str]:
+    """
+    Extract VINs from raw text using regex.
+    VINs are exactly 17 characters, excluding I, O, Q.
+    """
+    # Look for VIN patterns - various label formats in Bulgarian and English
+    vin_pattern = re.compile(
+        r'(?:VIN|Рама\s*№?|Шаси\s*№?|vin|Vehicle\s+Identification)\s*[:\s]*([A-HJ-NPR-Z0-9]{17})',
+        re.IGNORECASE
+    )
+    matches = vin_pattern.findall(text)
+
+    # Also look for standalone 17-char sequences that look like VINs
+    standalone_pattern = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
+    all_matches = standalone_pattern.findall(text.upper())
+
+    # Combine and dedupe
+    vins = list(dict.fromkeys([m.upper() for m in matches] + all_matches))
+
+    # Filter out obvious non-VINs (all digits, all letters)
+    valid_vins = []
+    for vin in vins:
+        has_digit = any(c.isdigit() for c in vin)
+        has_letter = any(c.isalpha() for c in vin)
+        if has_digit and has_letter:
+            valid_vins.append(vin)
+
+    return valid_vins
+
+
+def extract_damaged_parts_from_text(text: str) -> list[str]:
+    """
+    Extract damaged parts from Bulgarian damage descriptions using keyword matching.
+    """
+    # Bulgarian -> English part mappings
+    part_keywords = {
+        # Bumpers
+        'предна броня': 'front bumper',
+        'задна броня': 'rear bumper',
+        'броня': 'bumper',
+        # Lights
+        'преден фар': 'front headlight',
+        'заден фар': 'rear taillight',
+        'фар': 'headlight',
+        'ляв фар': 'left headlight',
+        'десен фар': 'right headlight',
+        'мигач': 'turn signal',
+        # Body panels
+        'калник': 'fender',
+        'преден калник': 'front fender',
+        'заден калник': 'rear fender',
+        'капак': 'hood',
+        'врата': 'door',
+        'предна врата': 'front door',
+        'задна врата': 'rear door',
+        'лява врата': 'left door',
+        'дясна врата': 'right door',
+        'задна дясна врата': 'rear right door',
+        'задна лява врата': 'rear left door',
+        'предна дясна врата': 'front right door',
+        'предна лява врата': 'front left door',
+        'багажник': 'trunk',
+        'таван': 'roof',
+        'праг': 'rocker panel',
+        # Glass
+        'предно стъкло': 'windshield',
+        'задно стъкло': 'rear window',
+        'странично стъкло': 'side window',
+        'огледало': 'mirror',
+        # Damage descriptions (action words)
+        'деформиран': 'deformed',
+        'счупен': 'broken',
+        'вдлъбнатина': 'dent',
+        'драскотина': 'scratch',
+    }
+
+    text_lower = text.lower()
+    found_parts = []
+
+    # Look for Bulgarian part keywords
+    for bg_term, en_term in part_keywords.items():
+        if bg_term in text_lower:
+            # Avoid duplicates, prefer specific terms over generic
+            if en_term not in found_parts:
+                found_parts.append(en_term)
+
+    # Filter out action words (keep only parts)
+    action_words = {'deformed', 'broken', 'dent', 'scratch'}
+    found_parts = [p for p in found_parts if p not in action_words]
+
+    return found_parts
+
+
+def enrich_extraction_with_fallback(data: dict, raw_text: str) -> tuple[dict, list]:
+    """
+    Enrich LLM extraction with regex-based fallbacks for commonly missed fields.
+    Runs after validate_extraction to fill in gaps.
+
+    Returns:
+        Tuple of (enriched_data, info_messages)
+    """
+    info = []
+
+    # Extract VINs from raw text
+    text_vins = extract_vins_from_text(raw_text)
+
+    # Check each vehicle for missing VIN
+    vehicles = data.get("vehicles", [])
+    vin_index = 0
+    for v in vehicles:
+        if not v.get("vin") and vin_index < len(text_vins):
+            v["vin"] = text_vins[vin_index]
+            info.append(f"Fallback: extracted VIN {text_vins[vin_index]} from text")
+            vin_index += 1
+
+    # Extract damaged parts if missing
+    for v in vehicles:
+        if not v.get("damaged_parts") or len(v.get("damaged_parts", [])) == 0:
+            # Try to extract from vehicle's damage_description first
+            damage_desc = v.get("damage_description", "")
+            parts = extract_damaged_parts_from_text(damage_desc)
+
+            # If nothing from description, try the raw text
+            if not parts:
+                parts = extract_damaged_parts_from_text(raw_text)
+
+            if parts:
+                v["damaged_parts"] = parts
+                info.append(f"Fallback: extracted parts {parts} from text")
+
+    return data, info
