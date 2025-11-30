@@ -34,7 +34,7 @@ Legal AI is a document processing pipeline for Bulgarian automotive insurance cl
 **Key Services:**
 - **Gateway** (`services/gateway/`): FastAPI orchestrator with `/process` and `/process-text` endpoints
 - **OCR** (`services/ocr/`): PaddleOCR with Cyrillic language support for Bulgarian documents
-- **LLM**: vLLM serving Qwen3-32B-AWQ across 6 GPUs with tensor parallelism
+- **LLM**: vLLM serving Qwen3-32B-AWQ across 4 GPUs with tensor parallelism
 - **Physics** (`services/physics/`): Crash reconstruction using Momentum 360 and Impact Theory formulas
 - **Car Value** (`services/car_value/`): On-demand price scraper with VIN decoding (cars.bg + mobile.bg + NHTSA API)
 - **Nominatim**: Geocoding service with Bulgaria OSM data (returns lat/lon coordinates)
@@ -43,10 +43,20 @@ Legal AI is a document processing pipeline for Bulgarian automotive insurance cl
 
 ## Commands
 
+### Connecting to the Rig
+
+```bash
+# SSH to GPU server
+ssh ubuntu@192.168.1.32
+
+# Project location on rig
+cd /home/ubuntu/legal-ai
+```
+
 ### Running the Pipeline
 
 ```bash
-# Initial setup (requires 6 GPUs)
+# Initial setup (requires 4 GPUs)
 ./init.sh
 
 # Start all services
