@@ -176,7 +176,7 @@ V1y = (m1*V1'*sin(β1) + m2*V2'*sin(β2)) / m1*sin(α1)
 V1 = sqrt(V1x² + V1y²)
 ```
 
-## Car Value Service (v3.2.0)
+## Car Value Service (v3.3.0)
 
 On-demand price scraper with VIN decoding and parts pricing (no database required):
 
@@ -200,11 +200,11 @@ On-demand price scraper with VIN decoding and parts pricing (no database require
 - **Fallback**: Local WMI decode (manufacturer + country from first 3 chars)
 - **Cache**: Permanent Redis cache (VINs don't change)
 
-### Parts Pricing (NEW)
+### Parts Pricing
 LLM extracts `damaged_parts` list from claim documents, then gateway calls `/parts/search` to get real-time prices:
-- **autopower.bg**: OEM and aftermarket parts
-- **alo.bg**: Used parts marketplace
-- **mobile.bg**: Auto parts section
+- **bazar.bg**: Bulgarian classifieds (new and used parts)
+- **alochasti.bg**: Dedicated auto parts store
+- **autoprofi.bg**: Sofia-based OEM and aftermarket parts
 
 Parts search includes automatic translation (English → Bulgarian) and labor cost estimation.
 

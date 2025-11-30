@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Car Value Service",
     description="Bulgarian car market value + VIN decoder + parts pricing",
-    version="3.2.0"
+    version="3.3.0"
 )
 
 # Redis client for caching
@@ -106,7 +106,7 @@ async def health_check():
     return {
         "status": "healthy",
         "service": "car_value",
-        "version": "3.2.0",
+        "version": "3.3.0",
         "redis": redis_ok
     }
 
@@ -815,19 +815,19 @@ async def search_parts_prices(request: PartsSearchRequest):
 
 
 async def search_part_prices(make: str, model: str, year: int, part_en: str, part_bg: str) -> Dict:
-    """Search multiple sources for part prices."""
+    """Search multiple Bulgarian auto parts sites for prices."""
     results = {}
 
-    # Run searches in parallel
+    # Run searches in parallel on proper auto parts websites
     tasks = [
-        search_autopower(make, model, year, part_bg),
-        search_alo_bg(make, model, year, part_bg),
-        search_mobile_bg_parts(make, model, year, part_bg),
+        search_bazar_bg(make, model, year, part_bg),
+        search_alochasti_bg(make, model, year, part_bg),
+        search_autoprofi_bg(make, model, year, part_bg),
     ]
 
     search_results = await asyncio.gather(*tasks, return_exceptions=True)
 
-    sources = ["autopower.bg", "alo.bg", "mobile.bg"]
+    sources = ["bazar.bg", "alochasti.bg", "autoprofi.bg"]
     for source, result in zip(sources, search_results):
         if isinstance(result, Exception):
             logger.error(f"Search error for {source}: {result}")
@@ -838,12 +838,17 @@ async def search_part_prices(make: str, model: str, year: int, part_en: str, par
     return results
 
 
-async def search_autopower(make: str, model: str, year: int, part_bg: str) -> Dict:
-    """Search autopower.bg for parts."""
+async def search_bazar_bg(make: str, model: str, year: int, part_bg: str) -> Dict:
+    """
+    Search bazar.bg for auto parts (new and used).
+
+    Bazar.bg is a Bulgarian classifieds site with auto parts section.
+    Price format: "200 лв" with optional EUR equivalent.
+    """
     try:
-        # Build search query
-        query = f"{part_bg} {make} {model}"
-        search_url = f"https://www.autopower.bg/search?q={quote_plus(query)}"
+        # Bazar.bg search URL - search in auto parts category
+        query = f"{part_bg} {make}"
+        search_url = f"https://bazar.bg/obiavi?q={quote_plus(query)}"
 
         headers = {
             "User-Agent": USER_AGENT,
@@ -860,23 +865,13 @@ async def search_autopower(make: str, model: str, year: int, part_bg: str) -> Di
             html = resp.text
             prices = []
 
-            # Extract prices (format: "1 234 лв" or "1234 лв" or "€123")
-            # autopower.bg uses various formats
-            for match in re.findall(r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:лв|BGN)', html):
+            # Bazar.bg price format: "200 лв" or "1 200 лв"
+            # Also shows EUR: "102.26 €"
+            for match in re.findall(r'(\d{1,3}(?:[\s,]?\d{3})*)\s*лв', html):
                 try:
-                    price = int(match.replace(' ', '').replace('\xa0', ''))
-                    if 10 < price < 50000:  # Parts typically 10-50000 BGN
+                    price = int(match.replace(' ', '').replace(',', ''))
+                    if 20 < price < 50000:  # Filter reasonable part prices
                         prices.append(price)
-                except:
-                    continue
-
-            # Also check for EUR prices
-            for match in re.findall(r'€\s*(\d{1,3}(?:[\s\xa0]?\d{3})*)', html):
-                try:
-                    price_eur = int(match.replace(' ', '').replace('\xa0', ''))
-                    price_bgn = int(price_eur * 1.96)
-                    if 10 < price_bgn < 50000:
-                        prices.append(price_bgn)
                 except:
                     continue
 
@@ -884,27 +879,33 @@ async def search_autopower(make: str, model: str, year: int, part_bg: str) -> Di
             prices = sorted(list(set(prices)))
 
             return {
-                "prices": prices[:10],  # Top 10 prices
+                "prices": prices[:15],  # Top 15 prices
                 "count": len(prices),
-                "url": search_url
+                "url": search_url,
+                "type": "classifieds"
             }
 
     except Exception as e:
-        logger.error(f"autopower.bg error: {e}")
+        logger.error(f"bazar.bg error: {e}")
         return {"error": str(e), "prices": []}
 
 
-async def search_alo_bg(make: str, model: str, year: int, part_bg: str) -> Dict:
-    """Search alo.bg for used parts."""
+async def search_alochasti_bg(make: str, model: str, year: int, part_bg: str) -> Dict:
+    """
+    Search alochasti.bg for auto parts.
+
+    Alochasti.bg is a dedicated Bulgarian auto parts store.
+    Price format: "180.00 лв." with EUR equivalent "€ 92.03"
+    """
     try:
-        # alo.bg search URL
+        # Alochasti.bg search URL
         query = f"{part_bg} {make}"
-        search_url = f"https://www.alo.bg/obiavi/?q={quote_plus(query)}"
+        search_url = f"https://alochasti.bg/search?search={quote_plus(query)}"
 
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "bg-BG,bg;q=0.9",
+            "Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8",
         }
 
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
@@ -916,40 +917,57 @@ async def search_alo_bg(make: str, model: str, year: int, part_bg: str) -> Dict:
             html = resp.text
             prices = []
 
-            # alo.bg price format: "цена: 123 лв" or just "123 лв"
-            for match in re.findall(r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:лв|лева|BGN)', html, re.IGNORECASE):
+            # Alochasti.bg price format: "180.00 лв." or "1 234.56 лв."
+            for match in re.findall(r'(\d{1,3}(?:[\s,]?\d{3})*(?:\.\d{2})?)\s*лв\.?', html):
                 try:
-                    price = int(match.replace(' ', '').replace('\xa0', ''))
-                    if 10 < price < 30000:  # Used parts typically cheaper
+                    # Remove spaces and convert decimal
+                    clean = match.replace(' ', '').replace(',', '')
+                    price = int(float(clean))
+                    if 20 < price < 50000:
                         prices.append(price)
+                except:
+                    continue
+
+            # Also check EUR prices: "€ 92.03"
+            for match in re.findall(r'€\s*(\d{1,3}(?:[\s,]?\d{3})*(?:\.\d{2})?)', html):
+                try:
+                    clean = match.replace(' ', '').replace(',', '')
+                    price_eur = float(clean)
+                    price_bgn = int(price_eur * 1.96)
+                    if 20 < price_bgn < 50000:
+                        prices.append(price_bgn)
                 except:
                     continue
 
             prices = sorted(list(set(prices)))
 
             return {
-                "prices": prices[:10],
+                "prices": prices[:15],
                 "count": len(prices),
                 "url": search_url,
-                "type": "used"  # Mark as used parts
+                "type": "store"
             }
 
     except Exception as e:
-        logger.error(f"alo.bg error: {e}")
+        logger.error(f"alochasti.bg error: {e}")
         return {"error": str(e), "prices": []}
 
 
-async def search_mobile_bg_parts(make: str, model: str, year: int, part_bg: str) -> Dict:
-    """Search mobile.bg parts section."""
+async def search_autoprofi_bg(make: str, model: str, year: int, part_bg: str) -> Dict:
+    """
+    Search autoprofi.bg for auto parts.
+
+    AutoProfi.bg is a Sofia-based auto parts store with OEM and aftermarket parts.
+    """
     try:
-        # mobile.bg auto parts section
+        # AutoProfi.bg search URL
         query = f"{part_bg} {make}"
-        search_url = f"https://www.mobile.bg/obiavi/avto-chasti-aksesori/?q={quote_plus(query)}"
+        search_url = f"https://autoprofi.bg/search?q={quote_plus(query)}"
 
         headers = {
             "User-Agent": USER_AGENT,
             "Accept": "text/html,application/xhtml+xml",
-            "Accept-Language": "bg-BG,bg;q=0.9",
+            "Accept-Language": "bg-BG,bg;q=0.9,en;q=0.8",
         }
 
         async with httpx.AsyncClient(timeout=15, follow_redirects=True) as client:
@@ -958,18 +976,21 @@ async def search_mobile_bg_parts(make: str, model: str, year: int, part_bg: str)
             if resp.status_code != 200:
                 return {"error": f"HTTP {resp.status_code}", "prices": []}
 
-            try:
-                html = resp.content.decode('windows-1251')
-            except:
-                html = resp.text
-
+            html = resp.text
             prices = []
 
-            # Extract prices
-            for match in re.findall(r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:лв|BGN)', html):
+            # AutoProfi price format: various BGN formats
+            for match in re.findall(r'(\d{1,3}(?:[\s,.]?\d{3})*(?:[.,]\d{2})?)\s*(?:лв|BGN|лева)', html, re.IGNORECASE):
                 try:
-                    price = int(match.replace(' ', '').replace('\xa0', ''))
-                    if 10 < price < 50000:
+                    # Normalize: remove spaces, handle both . and , as decimal
+                    clean = match.replace(' ', '')
+                    # If has comma as thousands separator
+                    if ',' in clean and '.' in clean:
+                        clean = clean.replace(',', '')
+                    elif ',' in clean:
+                        clean = clean.replace(',', '.')
+                    price = int(float(clean))
+                    if 20 < price < 50000:
                         prices.append(price)
                 except:
                     continue
@@ -977,13 +998,14 @@ async def search_mobile_bg_parts(make: str, model: str, year: int, part_bg: str)
             prices = sorted(list(set(prices)))
 
             return {
-                "prices": prices[:10],
+                "prices": prices[:15],
                 "count": len(prices),
-                "url": search_url
+                "url": search_url,
+                "type": "store"
             }
 
     except Exception as e:
-        logger.error(f"mobile.bg parts error: {e}")
+        logger.error(f"autoprofi.bg error: {e}")
         return {"error": str(e), "prices": []}
 
 
@@ -992,7 +1014,7 @@ async def root():
     """Root endpoint with service info."""
     return {
         "service": "Car Value Service",
-        "version": "3.2.0",
+        "version": "3.3.0",
         "description": "Bulgarian car market value + VIN decoder + parts pricing",
         "endpoints": {
             "/vin/{vin}": "Decode VIN to get vehicle info",
