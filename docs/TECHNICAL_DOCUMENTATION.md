@@ -1,6 +1,6 @@
 # Legal AI - Technical Documentation
 
-## Version 1.0.0 | Document Processing Pipeline for Bulgarian Automotive Insurance Claims
+## Version 2.0.0 | Document Processing Pipeline for Bulgarian Automotive Insurance Claims
 
 ---
 
@@ -30,10 +30,11 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
 1. **Document Ingestion**: Accepts PDF and image files containing Bulgarian insurance claim documents
 2. **Text Extraction**: Uses Tesseract OCR with Bulgarian/Russian/English language support to extract text
 3. **Structured Data Extraction**: Employs a large language model (Qwen3-32B-AWQ) to parse unstructured text into structured JSON
-4. **Location Enrichment**: Geocodes accident locations using Nominatim with Bulgaria OSM data
-5. **Vehicle Valuation**: Provides current market values by scraping Bulgarian car listing sites (cars.bg, mobile.bg)
-6. **Physics Analysis**: Performs crash reconstruction using Bulgarian methodology (Momentum 360, Impact Theory)
-7. **Settlement Recommendation**: Calculates recommended settlement amounts based on extracted data
+4. **VIN Decoding**: Extracts and decodes Vehicle Identification Numbers (VINs) from documents using NHTSA API
+5. **Location Enrichment**: Geocodes accident locations using Nominatim with Bulgaria OSM data
+6. **Vehicle Valuation**: Provides current market values via on-demand scraping of Bulgarian car listing sites (cars.bg, mobile.bg)
+7. **Physics Analysis**: Performs crash reconstruction using Bulgarian methodology (Momentum 360, Impact Theory)
+8. **Settlement Recommendation**: Calculates recommended settlement amounts based on extracted data
 
 ## 1.3 Target Users
 
@@ -48,9 +49,10 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
 ## 1.4 Key Features
 
 - Support for Bulgarian Cyrillic text (OCR optimized for Bulgarian documents)
+- VIN extraction and decoding from document text (supports Bulgarian terms: "Rama No", "Shasi No")
 - All monetary values in Bulgarian Lev (BGN)
 - Physics calculations based on Bulgarian crash reconstruction methodology
-- Real-time car market values from Bulgarian listing sites
+- Real-time car market values from Bulgarian listing sites (on-demand scraping)
 - Geocoding restricted to Bulgaria for accurate location data
 
 ---
@@ -88,11 +90,11 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
     +----------+ +----------+ +-----------+     +----------+ +-----------+ +----------+
     | Port 8001| | Port 8004| | Port 8000 |     | Port 8003| | Port 8002 | | Port 3000|
     +----------+ +----------+ +-----------+     +----------+ +-----------+ +----------+
-    | Tesseract| | Momentum | | Qwen3-32B |     | Scraping | | Bulgaria  | | Open     |
-    | bul+rus  | | 360 &    | | AWQ       |     | cars.bg  | | OSM Data  | | WebUI    |
-    | +eng     | | Impact   | | 4 GPUs    |     | mobile.bg| |           | |          |
-    +----------+ | Theory   | | Tensor    |     +----+-----+ +-----------+ +----------+
-                 +----------+ | Parallel  |          |
+    | Tesseract| | Momentum | | Qwen3-32B |     | On-demand| | Bulgaria  | | Open     |
+    | bul+rus  | | 360 &    | | AWQ       |     | scraping | | OSM Data  | | WebUI    |
+    | +eng     | | Impact   | | 4 GPUs    |     | + VIN    | |           | |          |
+    +----------+ | Theory   | | Tensor    |     | decode   | +-----------+ +----------+
+                 +----------+ | Parallel  |     +----+-----+
                               +-----------+          |
                                     |                |
                                     v                v
@@ -101,8 +103,9 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
                               |  :6379   |    |  :5432   |
                               +----------+    +----------+
                               | Cache    |    | Claims   |
-                              | 24h TTL  |    | Prices   |
-                              | Car vals |    | Parts    |
+                              | 24h TTL  |    | Parts    |
+                              | prices   |    |          |
+                              | VIN perm |    |          |
                               +----------+    +----------+
 ```
 
@@ -139,11 +142,12 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
 - **Port**: 8004
 - **Methods**: Momentum 360, Impact Theory, Dangerous Zone
 
-### 2.2.5 Car Value Service
-- **Purpose**: Provide current market values for vehicles
-- **Technology**: Python FastAPI with web scraping (httpx, BeautifulSoup)
+### 2.2.5 Car Value Service (v3.0.0)
+- **Purpose**: Provide current market values for vehicles and decode VINs
+- **Technology**: Python FastAPI with web scraping (httpx, BeautifulSoup) and NHTSA API
 - **Port**: 8003
-- **Data Sources**: cars.bg, mobile.bg, PostgreSQL database
+- **Data Sources**: On-demand scraping (cars.bg, mobile.bg), NHTSA VIN API
+- **Caching**: Redis (24h TTL for prices, permanent for VIN decodes)
 
 ### 2.2.6 Nominatim (Geocoding)
 - **Purpose**: Convert addresses to coordinates
@@ -153,14 +157,14 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
 - **Data**: OpenStreetMap Bulgaria extract
 
 ### 2.2.7 PostgreSQL
-- **Purpose**: Persistent storage for claims, prices, and parts data
+- **Purpose**: Persistent storage for claims and parts data
 - **Port**: 5432
 - **Database**: legal_ai
 
 ### 2.2.8 Redis
-- **Purpose**: Caching layer for car value lookups
+- **Purpose**: Caching layer for car values and VIN decodes
 - **Port**: 6379
-- **TTL**: 24 hours for price data
+- **TTL**: 24 hours for price data, permanent for VIN decodes
 
 ### 2.2.9 Open WebUI (Debug)
 - **Purpose**: ChatGPT-like interface for testing the LLM
@@ -179,6 +183,7 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
 | Geocoding | Nominatim 4.4 |
 | Containerization | Docker Compose |
 | Web Scraping | httpx, BeautifulSoup4 |
+| VIN Decoding | NHTSA vPIC API |
 | Async DB | asyncpg |
 | HTTP Client | httpx (async) |
 
@@ -251,6 +256,7 @@ curl -X POST "http://localhost:80/process-text" \
   },
   "vehicles": [
     {
+      "vin": "WVWZZZ3CZWE123456",
       "registration": "CB 1234 AB",
       "make": "Volkswagen",
       "model": "Golf",
@@ -331,10 +337,10 @@ curl -X POST "http://localhost:8001/ocr" \
 **Response:**
 ```json
 {
-  "text": "ЗАСТРАХОВАТЕЛНА ПОЛИЦА\nНомер: 12345\n...",
+  "text": "ZASTRAKHOVATELNA POLITSA\nNomer: 12345\n...",
   "pages": 2,
   "page_texts": [
-    "ЗАСТРАХОВАТЕЛНА ПОЛИЦА...",
+    "ZASTRAKHOVATELNA POLITSA...",
     "Page 2 content..."
   ],
   "filename": "document.pdf"
@@ -371,6 +377,7 @@ Serve the Qwen3-32B-AWQ model for structured data extraction from insurance clai
 - Minimum: 4 NVIDIA GPUs with 16GB+ VRAM each
 - Recommended: 4x A100 or 4x RTX 4090
 - The model uses tensor parallelism across all 4 GPUs
+- GPU persistence mode should be enabled (`nvidia-smi -pm 1`) to prevent Xid 79 crashes
 
 ### 3.3.5 Startup Time
 - First startup: ~5 minutes (model loading)
@@ -396,6 +403,7 @@ Perform crash physics calculations using Bulgarian methodology for:
 | `/velocity-from-skid` | POST | Calculate speed from skid marks |
 | `/validate-claimed-speed` | POST | Validate driver's claimed speed |
 | `/dangerous-zone` | POST | Calculate stopping distance |
+| `/impact-energy` | POST | Calculate impact energy, delta-V, and damage severity |
 | `/formulas` | GET | Return all physics formulas used |
 | `/health` | GET | Health check |
 
@@ -413,55 +421,86 @@ Perform crash physics calculations using Bulgarian methodology for:
 
 ---
 
-## 3.5 Car Value Service
+## 3.5 Car Value Service (v3.0.0)
 
 ### 3.5.1 Purpose
-Provide current market values for vehicles in Bulgaria through multiple data sources.
+Provide current market values for vehicles in Bulgaria and decode VINs through:
+- VIN decoding via NHTSA API with local WMI fallback
+- On-demand live web scraping (cars.bg, mobile.bg)
+- Redis caching for performance
 
 ### 3.5.2 Endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/value/{make}/{model}/{year}` | GET | Get vehicle market value |
+| `/vin/{vin}` | GET | Decode VIN via NHTSA API (make, model, year, country, engine info) |
+| `/value-by-vin/{vin}` | GET | Decode VIN + lookup market value |
+| `/value/{make}/{model}/{year}` | GET | Get vehicle market value (on-demand scrape) |
 | `/parts/{make}/{category}` | GET | Get parts prices |
 | `/parts/estimate-damage` | GET | Estimate repair cost |
-| `/admin/scrape/{source}` | POST | Trigger scraping job |
-| `/admin/aggregate` | POST | Aggregate scraped data |
 | `/health` | GET | Health check |
 
-### 3.5.3 Data Source Priority
+### 3.5.3 Data Source Priority (v3.0.0)
 
 ```
 +---------------------+
-|  1. Redis Cache     |  <-- Fastest (24h TTL)
+|  1. Redis Cache     |  <-- Fastest (24h TTL for prices, permanent for VIN)
 +---------------------+
          |
          v (cache miss)
 +---------------------+
-|  2. Aggregated DB   |  <-- Pre-computed averages
-+---------------------+
-         |
-         v (not found)
-+---------------------+
-|  3. Live Scrape     |  <-- cars.bg (primary)
+|  2. Live Scrape     |  <-- cars.bg (primary)
 |     cars.bg         |
 +---------------------+
          |
          v (no results)
 +---------------------+
-|  4. Live Scrape     |  <-- mobile.bg (backup)
+|  3. Live Scrape     |  <-- mobile.bg (backup)
 |     mobile.bg       |
 +---------------------+
          |
          v (no results)
 +---------------------+
-|  5. Static DB       |  <-- Fallback estimates
-|     Estimates       |
+|  4. Return vehicle  |  <-- No price, manual valuation required
+|     info only       |
 +---------------------+
 ```
 
-### 3.5.4 Supported Makes
+**Note**: Unlike v2.0.0, there is no database storage of scraped listings, no static fallback prices, and no pre-computed aggregates. All pricing is on-demand.
+
+### 3.5.4 VIN Decoding
+
+The VIN decoding feature was added in v3.0.0:
+
+**Primary Source**: NHTSA vPIC API
+- Free, no API key required
+- Works for EU vehicles (decodes make, model, year, engine, body class)
+- Returns detailed vehicle specifications
+
+**Fallback**: Local WMI Decode
+- Uses first 3 characters of VIN (World Manufacturer Identifier)
+- Returns manufacturer and country of origin
+- Model details not available in fallback mode
+
+**Caching**: VIN decodes are cached permanently in Redis (VINs don't change)
+
+**Validation**: VINs are validated for:
+- Exactly 17 characters
+- No I, O, Q characters (prohibited in VINs)
+- Alphanumeric characters only
+- Check digit validation (position 9)
+
+### 3.5.5 Supported Makes
 BMW, Mercedes-Benz, Audi, Volkswagen, Toyota, Opel, Ford, Renault, Peugeot, Skoda, Honda, Mazda, Nissan, Volvo, Hyundai, Kia
+
+### 3.5.6 Removed Features (from v2.0.0)
+The following features were removed in the v3.0.0 rewrite:
+- Database storage of scraped listings (`car_listings` table)
+- Pre-computed price aggregates (`car_prices_aggregated` table)
+- Static fallback prices (`vehicle_prices` table)
+- Admin endpoints (`/admin/scrape`, `/admin/aggregate`)
+- Cron job for scheduled scraping (`scripts/price_updater.sh`)
+- Scraper job logging (`scraper_runs` table)
 
 ---
 
@@ -523,13 +562,14 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
     |
     | 4. POST /v1/chat/completions
     |    (prompt + extracted text)
+    |    (includes VIN extraction)
     v
 +---+--------+     +------------------+
 |    LLM     |---->| Return structured|
-|  (vLLM)    |     | JSON extraction  |
+|  (vLLM)    |     | JSON with VIN    |
 +------------+     +------------------+
     |
-    | 5. Structured claim data
+    | 5. Structured claim data (includes VIN)
     v
 +---+--------+
 |  Gateway   |
@@ -540,17 +580,23 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
     |             |             |             |
     | 6a. GET     | 6b. GET     | 6c. POST    |
     | /search     | /value/...  | /momentum-  |
-    v             v             | 360         |
-+----------+ +----------+       v             |
-| Nominatim| |Car Value |  +----------+      |
-| Geocoding| | Service  |  | Physics  |      |
-+----+-----+ +----+-----+  | Service  |      |
-     |            |        +----+-----+      |
-     |            |             |            |
-     | lat/lon    | market      | velocity   |
-     |            | value BGN   | analysis   |
-     v            v             v            |
-+---+------------+-------------+-------------+
+    |             | or /value-  | 360         |
+    |             | by-vin/...  |             |
+    v             v             v             |
++----------+ +----------+ +----------+       |
+| Nominatim| |Car Value |  | Physics  |       |
+| Geocoding| | Service  |  | Service  |       |
++----+-----+ +----+-----+  +----+-----+       |
+     |            |             |             |
+     |            +--+          |             |
+     |               |          |             |
+     | lat/lon    +--+--+       | velocity    |
+     |            |Redis|       | analysis    |
+     |            |Cache|       |             |
+     |            +--+--+       |             |
+     |               |          |             |
+     v            v  v          v             |
++---+------------+--+---------+-------------+
 |              Gateway Service               |
 |         (aggregate all results)            |
 +---+----------------------------------------+
@@ -624,7 +670,7 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
 +--------+
 ```
 
-## 4.3 Car Value Lookup Flow
+## 4.3 Car Value Lookup Flow (v3.0.0)
 
 ```
 +-------------------+
@@ -635,7 +681,7 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
          v
 +--------+----------+
 | Check Redis Cache |
-| Key: car:v2:{m}:  |
+| Key: car:v3:{m}:  |
 |      {model}:{yr} |
 +--------+----------+
          |
@@ -645,20 +691,19 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
     |         |
     v         v
 +-------+ +--------+----------+
-| Return| | Query PostgreSQL  |
-| cached| | car_prices_       |
-| result| | aggregated        |
-+-------+ +--------+----------+
-                   |
+| Return| | Scrape cars.bg    |
+| cached| | (live request)    |
+| result| +--------+----------+
++-------+          |
               +----+----+
               |         |
-            FOUND    NOT FOUND
+           FOUND    NOT FOUND
               |         |
               v         v
         +-------+ +--------+----------+
-        | Return| | Scrape cars.bg    |
-        | DB    | | (live request)    |
-        | price | +--------+----------+
+        | Cache | | Scrape mobile.bg  |
+        | &     | | (backup)          |
+        | Return| +--------+----------+
         +-------+          |
                       +----+----+
                       |         |
@@ -666,26 +711,56 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
                       |         |
                       v         v
                 +-------+ +--------+----------+
-                | Store | | Scrape mobile.bg  |
-                | &     | | (backup)          |
-                | Return| +--------+----------+
-                +-------+          |
-                              +----+----+
-                              |         |
-                           FOUND    NOT FOUND
-                              |         |
-                              v         v
-                        +-------+ +--------+----------+
-                        | Store | | Query vehicle_   |
-                        | &     | | prices (static)  |
-                        | Return| +--------+----------+
-                        +-------+          |
-                                           v
-                                     +-----------+
-                                     | Calculate |
-                                     | depreciated|
-                                     | estimate   |
-                                     +-----------+
+                | Cache | | Return vehicle    |
+                | &     | | info only         |
+                | Return| | (no price)        |
+                +-------+ +--------+----------+
+```
+
+## 4.4 VIN Lookup Flow (v3.0.0)
+
+```
++-------------------+
+| GET /vin/{vin}    |
++--------+----------+
+         |
+         v
++--------+----------+
+| Validate VIN      |
+| (17 chars, no IOQ)|
++--------+----------+
+         |
+         v
++--------+----------+
+| Check Redis Cache |
+| Key: vin:{vin}    |
++--------+----------+
+         |
+    +----+----+
+    |         |
+  HIT       MISS
+    |         |
+    v         v
++-------+ +--------+----------+
+| Return| | Query NHTSA API   |
+| cached| | (vPIC decode)     |
+| result| +--------+----------+
++-------+          |
+              +----+----+
+              |         |
+           SUCCESS   FAILED
+              |         |
+              v         v
+        +-------+ +--------+----------+
+        | Cache | | Local WMI decode  |
+        | perm  | | (first 3 chars)   |
+        | &     | +--------+----------+
+        | Return|          |
+        +-------+          v
+                    +--------+----------+
+                    | Cache perm &      |
+                    | Return (limited)  |
+                    +-------------------+
 ```
 
 ---
@@ -695,17 +770,17 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
 ## 5.1 Entity-Relationship Diagram
 
 ```
-+------------------+       +----------------------+       +------------------+
-|  vehicle_specs   |       |   processed_claims   |       |  vehicle_prices  |
-+------------------+       +----------------------+       +------------------+
-| id (PK)          |       | id (PK)              |       | id (PK)          |
-| make             |       | claim_number         |       | make             |
-| model            |       | filename             |       | model            |
-| year_from        |       | processing_time_ms   |       | base_price_bgn   |
-| year_to          |       | confidence_score     |       | depreciation_    |
-| weight_kg        |       | fault_percentage     |       |   per_year       |
-| length_mm        |       | settlement_amount_bgn|       | updated_at       |
-| width_mm         |       | result_json (JSONB)  |       +------------------+
++------------------+       +----------------------+
+|  vehicle_specs   |       |   processed_claims   |
++------------------+       +----------------------+
+| id (PK)          |       | id (PK)              |
+| make             |       | claim_number         |
+| model            |       | filename             |
+| year_from        |       | processing_time_ms   |
+| year_to          |       | confidence_score     |
+| weight_kg        |       | fault_percentage     |
+| length_mm        |       | settlement_amount_bgn|
+| width_mm         |       | result_json (JSONB)  |
 | height_mm        |       | raw_ocr_text         |
 | engine_cc        |       | created_at           |
 | horsepower       |       +----------------------+
@@ -713,44 +788,19 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
 | created_at       |
 +------------------+
 
-+------------------+       +----------------------+       +------------------+
-|   car_listings   |       | car_prices_aggregated|       | car_price_history|
-+------------------+       +----------------------+       +------------------+
-| id (PK)          |       | id (PK)              |       | id (PK)          |
-| source           |       | make                 |       | make             |
-| external_id      |       | model                |       | model            |
-| make             |       | variant              |       | year             |
-| model            |       | year                 |       | avg_price_bgn    |
-| variant          |       | avg_price_bgn        |       | sample_count     |
-| year             |       | min_price_bgn        |       | recorded_at      |
-| price_bgn        |       | max_price_bgn        |       +------------------+
-| price_original   |       | median_price_bgn     |
-| currency         |       | sample_count         |
-| mileage_km       |       | sources[]            |
-| fuel_type        |       | confidence           |
-| transmission     |       | updated_at           |
-| engine_cc        |       +----------------------+
-| horsepower       |              UNIQUE: (make,
-| color            |              model, variant,
-| location         |              year)
-| listing_url      |
-| scraped_at       |
-| is_active        |
 +------------------+
-
-+------------------+       +------------------+
-|    car_parts     |       |   scraper_runs   |
-+------------------+       +------------------+
-| id (PK)          |       | id (PK)          |
-| make             |       | source           |
-| model            |       | started_at       |
-| year_from        |       | finished_at      |
-| year_to          |       | listings_found   |
-| part_category    |       | listings_new     |
-| part_name        |       | listings_updated |
-| part_name_bg     |       | status           |
-| oem_price_bgn    |       | error_message    |
-| aftermarket_     |       +------------------+
+|    car_parts     |
++------------------+
+| id (PK)          |
+| make             |
+| model            |
+| year_from        |
+| year_to          |
+| part_category    |
+| part_name        |
+| part_name_bg     |
+| oem_price_bgn    |
+| aftermarket_     |
 |   price_bgn      |
 | labor_hours      |
 | labor_rate_bgn   |
@@ -758,6 +808,13 @@ Convert Bulgarian addresses to geographic coordinates (latitude/longitude).
 | updated_at       |
 +------------------+
 ```
+
+**Note**: In v3.0.0, the following tables were removed:
+- `car_listings` - Raw scraped listings (moved to on-demand scraping + Redis)
+- `car_prices_aggregated` - Pre-computed averages (now computed on-demand)
+- `car_price_history` - Historical price trends (no longer tracked)
+- `scraper_runs` - Scraper job log (no scheduled scraping)
+- `vehicle_prices` - Static fallback prices (no longer used)
 
 ## 5.2 Table Descriptions
 
@@ -795,60 +852,7 @@ Vehicle specifications for reference data.
 | `horsepower` | INT | Engine power |
 | `body_type` | VARCHAR(50) | Body style (sedan, hatchback, etc.) |
 
-### 5.2.3 vehicle_prices
-Static fallback price estimates.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | SERIAL | Primary key |
-| `make` | VARCHAR(100) | Manufacturer |
-| `model` | VARCHAR(100) | Model name |
-| `base_price_bgn` | FLOAT | Price when new (BGN) |
-| `depreciation_per_year` | FLOAT | Annual depreciation rate (default 8%) |
-
-### 5.2.4 car_listings
-Raw scraped listings from cars.bg and mobile.bg.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | SERIAL | Primary key |
-| `source` | VARCHAR(50) | Source site (cars.bg, mobile.bg) |
-| `external_id` | VARCHAR(100) | ID from source site |
-| `make` | VARCHAR(100) | Manufacturer |
-| `model` | VARCHAR(100) | Model name |
-| `variant` | VARCHAR(100) | Variant (e.g., 320i, 2.0 TDI) |
-| `year` | INT | Year of manufacture |
-| `price_bgn` | FLOAT | Price in BGN |
-| `price_original` | FLOAT | Original price if EUR |
-| `currency` | VARCHAR(10) | Original currency |
-| `mileage_km` | INT | Mileage in km |
-| `fuel_type` | VARCHAR(50) | Fuel type |
-| `transmission` | VARCHAR(50) | Transmission type |
-| `location` | VARCHAR(100) | City in Bulgaria |
-| `listing_url` | TEXT | URL to original listing |
-| `scraped_at` | TIMESTAMP | When scraped |
-| `is_active` | BOOLEAN | Is listing still active |
-
-### 5.2.5 car_prices_aggregated
-Aggregated prices computed from scraped listings.
-
-| Column | Type | Description |
-|--------|------|-------------|
-| `id` | SERIAL | Primary key |
-| `make` | VARCHAR(100) | Manufacturer |
-| `model` | VARCHAR(100) | Model name |
-| `variant` | VARCHAR(100) | Variant (NULL = all) |
-| `year` | INT | Year of manufacture |
-| `avg_price_bgn` | FLOAT | Average price |
-| `min_price_bgn` | FLOAT | Minimum price |
-| `max_price_bgn` | FLOAT | Maximum price |
-| `median_price_bgn` | FLOAT | Median price |
-| `sample_count` | INT | Number of listings |
-| `sources` | TEXT[] | Array of source sites |
-| `confidence` | FLOAT | Confidence score (0-1) |
-| `updated_at` | TIMESTAMP | Last update |
-
-### 5.2.6 car_parts
+### 5.2.3 car_parts
 Parts pricing for damage estimation.
 
 | Column | Type | Description |
@@ -902,6 +906,7 @@ Extract the following information and return as valid JSON:
   },
   "vehicles": [
     {
+      "vin": "17-character Vehicle Identification Number (VIN) or null",
       "registration": "license plate number",
       "make": "manufacturer (e.g., Volkswagen, BMW)",
       "model": "model name (e.g., Golf, 3 Series)",
@@ -972,8 +977,40 @@ Extract the following information and return as valid JSON:
 7. Extract actual values from the document, do not make up information
 8. Return ONLY the JSON object, no additional text
 9. For physics angles: 0 deg = East, 90 deg = North, 180 deg = West, 270 deg = South
+10. VIN (Vehicle Identification Number) is exactly 17 characters (letters A-H,J-N,P,R-Z and digits 0-9, excludes I,O,Q)
+11. VIN may appear as "VIN:", "Rama No", "Shasi No", or similar in Bulgarian documents
 
-## 6.2 LLM Configuration
+## 6.2 VIN Extraction (New in v2.0.0)
+
+The LLM extraction prompt now includes specific instructions for extracting VINs:
+
+### 6.2.1 VIN Field in Vehicle Schema
+```json
+{
+  "vehicles": [
+    {
+      "vin": "17-character Vehicle Identification Number (VIN) or null",
+      ...
+    }
+  ]
+}
+```
+
+### 6.2.2 Bulgarian VIN Terms
+The prompt instructs the LLM to look for VINs under various Bulgarian labels:
+- `VIN:` - Standard English label
+- `Rama No` (Cyrillic) - Bulgarian for "Frame Number"
+- `Shasi No` (Cyrillic) - Bulgarian for "Chassis Number"
+
+### 6.2.3 VIN Validation
+Extracted VINs are validated using a regex pattern:
+```python
+vin_pattern = re.compile(r'^[A-HJ-NPR-Z0-9]{17}$')
+```
+
+Invalid VINs are set to `null` and a warning is added to the response.
+
+## 6.3 LLM Configuration
 
 | Parameter | Value | Rationale |
 |-----------|-------|-----------|
@@ -981,7 +1018,7 @@ Extract the following information and return as valid JSON:
 | `max_tokens` | 4096 | Sufficient for complete JSON response |
 | `response_format` | `{"type": "json_object"}` | Force JSON output |
 
-## 6.3 Document Truncation
+## 6.4 Document Truncation
 
 Documents longer than 15,000 characters are truncated to preserve beginning and end:
 
@@ -996,7 +1033,7 @@ if len(document_text) > max_doc_length:
     )
 ```
 
-## 6.4 JSON Parsing and Validation
+## 6.5 JSON Parsing and Validation
 
 The system includes robust JSON parsing that handles:
 - Markdown code blocks around JSON
@@ -1005,38 +1042,41 @@ The system includes robust JSON parsing that handles:
 - Trailing commas
 - Unquoted keys
 
-### 6.4.1 Validation Rules
+### 6.5.1 Validation Rules
 
 | Field | Validation |
 |-------|------------|
 | `accident_date` | Must match YYYY-MM-DD pattern |
 | `accident_time` | Must match HH:MM pattern |
 | `vehicle.year` | Must be between 1900-2030 |
+| `vehicle.vin` | Must match 17-char VIN pattern (no I,O,Q) |
 | `fault_percentage` | Must be 0-100 |
 | `confidence_score` | Must be 0.0-1.0 |
 | `settlement_amount` | Must be non-negative |
 
-## 6.5 Example Input/Output
+## 6.6 Example Input/Output
 
 ### Input (OCR-extracted text):
 ```
-КОНСТАТИВЕН ПРОТОКОЛ No 123456
-Дата: 15.01.2024 г.
-Час: 14:30
+KONSTATIVEN PROTOKOL No 123456
+Data: 15.01.2024 g.
+Chas: 14:30
 
-МЯСТО НА ПРОИЗШЕСТВИЕТО:
-гр. София, бул. Витоша No 15
+MYASTO NA PROIZSHESTVIYETO:
+gr. Sofiya, bul. Vitosha No 15
 
-УЧАСТНИЦИ:
-1. Иван Петров Иванов - водач на МПС с рег. No СВ 1234 АВ
-   Марка: Фолксваген Голф, 2018 г.
-   Застраховател: Булстрад, полица No 12345678
+UCHASTNITSI:
+1. Ivan Petrov Ivanov - vodach na MPS s reg. No SV 1234 AV
+   Marka: Folksvagen Golf, 2018 g.
+   VIN: WVWZZZ3CZWE123456
+   Zastrahovatel: Bulstrad, politsa No 12345678
 
-2. Мария Георгиева Димитрова - водач на МПС с рег. No СА 5678 ВС
-   Марка: БМВ 320, 2020 г.
+2. Mariya Georgieva Dimitrova - vodach na MPS s reg. No SA 5678 VS
+   Marka: BMW 320, 2020 g.
+   Rama No: WBA8E9C50JK123456
 
-ОПИСАНИЕ: При пресичане на кръстовището водачът на МПС 1
-не дава предимство на МПС 2...
+OPISANIE: Pri presichane na krastovishtyeto vodachat na MPS 1
+ne dava predimstvo na MPS 2...
 ```
 
 ### Output (LLM extraction):
@@ -1051,6 +1091,7 @@ The system includes robust JSON parsing that handles:
   },
   "vehicles": [
     {
+      "vin": "WVWZZZ3CZWE123456",
       "registration": "CB 1234 AB",
       "make": "Volkswagen",
       "model": "Golf",
@@ -1061,6 +1102,7 @@ The system includes robust JSON parsing that handles:
       "policy_number": "12345678"
     },
     {
+      "vin": "WBA8E9C50JK123456",
       "registration": "CA 5678 BC",
       "make": "BMW",
       "model": "320",
@@ -1332,16 +1374,111 @@ curl -X POST "http://localhost:8004/validate-claimed-speed" \
 
 # 8. Car Value Service
 
-## 8.1 Overview
+## 8.1 Overview (v3.0.0)
 
-The Car Value Service provides current market values for vehicles in Bulgaria by aggregating data from multiple sources:
-- Live web scraping (cars.bg, mobile.bg)
-- Aggregated historical data
-- Static fallback estimates
+The Car Value Service was completely rewritten in v3.0.0. It now provides:
+- **VIN decoding** via NHTSA API with local WMI fallback
+- **On-demand scraping** from cars.bg and mobile.bg
+- **Redis caching** (24h TTL for prices, permanent for VIN)
+- **Parts pricing** from database for damage estimation
 
-## 8.2 Scraping Strategy
+**Removed in v3.0.0:**
+- Database storage of scraped listings
+- Pre-computed price aggregates
+- Static fallback prices
+- Admin endpoints for scraping/aggregation
+- Cron job for scheduled scraping
 
-### 8.2.1 cars.bg Scraping
+## 8.2 VIN Decoding
+
+### 8.2.1 Endpoint: GET /vin/{vin}
+
+Decode a VIN to get vehicle information.
+
+**Request:**
+```bash
+curl "http://localhost:8003/vin/WVWZZZ3CZWE123456"
+```
+
+**Response (NHTSA decode):**
+```json
+{
+  "vin": "WVWZZZ3CZWE123456",
+  "valid": true,
+  "source": "nhtsa",
+  "make": "Volkswagen",
+  "model": "Golf",
+  "year": 2018,
+  "series": null,
+  "body_class": "Hatchback",
+  "drive_type": "Front Wheel Drive",
+  "engine_cylinders": "4",
+  "engine_displacement_l": "2.0",
+  "engine_hp": "147",
+  "fuel_type": "Gasoline",
+  "plant_city": "Wolfsburg",
+  "plant_country": "Germany",
+  "manufacturer": "Volkswagen AG",
+  "vehicle_type": "PASSENGER CAR",
+  "check_digit_valid": true
+}
+```
+
+**Response (local WMI fallback):**
+```json
+{
+  "vin": "WVWZZZ3CZWE123456",
+  "valid": true,
+  "source": "local",
+  "make": "Volkswagen",
+  "model": null,
+  "year": 2018,
+  "country": "Germany",
+  "wmi": "WVW",
+  "vds": "ZZZ3CZ",
+  "vis": "WE123456",
+  "check_digit_valid": true,
+  "note": "Limited decode - model/engine details not available"
+}
+```
+
+### 8.2.2 VIN Validation
+
+VINs are validated for:
+- Exactly 17 characters
+- No I, O, Q characters (prohibited in VINs)
+- Alphanumeric characters only (A-H, J-N, P-R, Z, 0-9)
+- Check digit validation (position 9)
+
+**Invalid VIN response:**
+```json
+{
+  "detail": "Invalid VIN format. Must be 17 alphanumeric characters (no I, O, Q)"
+}
+```
+
+### 8.2.3 WMI Mapping (Local Fallback)
+
+The service includes a mapping of World Manufacturer Identifiers:
+
+| WMI | Manufacturer | Country |
+|-----|--------------|---------|
+| WBA, WBS, WBY | BMW | Germany |
+| WDB, WDC, WDD | Mercedes-Benz | Germany |
+| WAU, WUA | Audi | Germany |
+| WVW, WV1, WV2 | Volkswagen | Germany |
+| VF1 | Renault | France |
+| VF3 | Peugeot | France |
+| TMB | Skoda | Czech Republic |
+| JTD | Toyota | Japan |
+| KMH | Hyundai | South Korea |
+| KNA, KNM | Kia | South Korea |
+| YV1, YV4 | Volvo | Sweden |
+| W0L | Opel | Germany |
+
+## 8.3 Scraping Strategy
+
+### 8.3.1 cars.bg Scraping
 
 **URL Pattern:**
 ```
@@ -1361,7 +1498,7 @@ bgn_pattern = r'<!--\s*([\d,\.]+)\s*BGN\s*-->'
 eur_pattern = r'<!--\s*([\d,\.]+)\s*EUR\s*-->'
 ```
 
-### 8.2.2 mobile.bg Scraping
+### 8.3.2 mobile.bg Scraping
 
 **URL Pattern:**
 ```
@@ -1381,16 +1518,16 @@ mobile.bg uses Windows-1251 encoding for Bulgarian text.
 
 **Price Patterns:**
 ```python
-bgn_pattern = r'(\d{1,3}(?:\s?\d{3})*)\s*(?:лв|BGN)'
+bgn_pattern = r'(\d{1,3}(?:\s?\d{3})*)\s*(?:lv|BGN)'
 eur_pattern = r'(\d{1,3}(?:\s?\d{3})*)\s*EUR'
 ```
 
-### 8.2.3 EUR to BGN Conversion
+### 8.3.3 EUR to BGN Conversion
 ```python
 price_bgn = price_eur * 1.96  # Fixed rate (BGN is pegged to EUR)
 ```
 
-## 8.3 Outlier Filtering
+## 8.4 Outlier Filtering
 
 Prices are filtered using the Interquartile Range (IQR) method:
 
@@ -1405,58 +1542,59 @@ if len(prices) > 5:
     prices = [p for p in prices if lower_bound <= p <= upper_bound]
 ```
 
-## 8.4 Caching Strategy
+## 8.5 Caching Strategy
 
-### 8.4.1 Redis Cache
-- **Key Format:** `car:v2:{make}:{model}:{year}`
-- **TTL:** 24 hours (86400 seconds)
+### 8.5.1 Redis Cache
+- **Price Cache Key:** `car:v3:{make}:{model}:{year}`
+- **Price TTL:** 24 hours (86400 seconds)
+- **VIN Cache Key:** `vin:{vin}`
+- **VIN TTL:** Permanent (VINs don't change)
 - **Serialization:** JSON
 
-### 8.4.2 Cache Flow
+### 8.5.2 Cache Flow
 ```
 Request -> Check Redis -> Hit? Return cached
-                       -> Miss? Query DB -> Hit? Cache & Return
-                                         -> Miss? Scrape -> Cache & Return
+                       -> Miss? Scrape -> Cache & Return (or return info only)
 ```
 
-## 8.5 Static Price Estimation
+## 8.6 No Price Available
 
-When no live data is available, prices are estimated using:
+When no live data is available from scraping (unlike v2.0.0, there is no static fallback):
 
-```python
-estimated = base_price * ((1 - depreciation_per_year) ** age)
-estimated = max(estimated, 1000)  # Minimum floor
+```json
+{
+  "make": "SomeMake",
+  "model": "SomeModel",
+  "year": 2020,
+  "average_price_bgn": null,
+  "source": "none",
+  "currency": "BGN",
+  "note": "No market data available - manual valuation required"
+}
 ```
 
-**Typical Depreciation Rates:**
-| Category | Rate |
-|----------|------|
-| Premium (BMW, Mercedes) | 10% |
-| Standard (VW, Toyota) | 8% |
-| Budget (Dacia, Fiat) | 8-10% |
+## 8.7 Parts Valuation
 
-## 8.6 Parts Valuation
-
-### 8.6.1 Part Categories
+### 8.7.1 Part Categories
 - **body**: Bumpers, doors, fenders, hood, trunk, mirrors, glass
 - **electrical**: Headlights, taillights, radiator, AC condenser
 - **suspension**: Shock absorbers, control arms
 - **engine**: Alternator, starter, water pump
 - **interior**: Seats, steering wheel, dashboard
 
-### 8.6.2 Pricing Structure
+### 8.7.2 Pricing Structure
 Each part has:
 - **OEM price**: Original manufacturer part price
 - **Aftermarket price**: Generic/third-party part price
 - **Labor hours**: Typical installation time
 - **Labor rate**: 50 BGN/hour default
 
-### 8.6.3 Damage Cost Calculation
+### 8.7.3 Damage Cost Calculation
 ```
 Total Cost = SUM(Part Price + (Labor Hours * Labor Rate))
 ```
 
-### 8.6.4 Example: Damage Estimate
+### 8.7.4 Example: Damage Estimate
 
 **Request:**
 ```bash
@@ -1487,20 +1625,6 @@ curl "http://localhost:8003/parts/estimate-damage?make=BMW&parts=Front%20Bumper,
 }
 ```
 
-## 8.7 Cron Job for Price Updates
-
-Daily scraping runs at 3 AM:
-```bash
-0 3 * * * /home/ubuntu/legal-ai/scripts/price_updater.sh
-```
-
-The scraper:
-1. Iterates through all supported makes
-2. Scrapes each year (current year - 10 to current year)
-3. Stores raw listings in `car_listings` table
-4. Aggregates into `car_prices_aggregated`
-5. Maintains 2-second delays between requests to avoid rate limiting
-
 ---
 
 # 9. Deployment
@@ -1522,6 +1646,7 @@ The scraper:
 - **VRAM:** 16GB+ per GPU
 - **Supported:** A100, A10, RTX 4090, RTX 3090
 - **Driver:** NVIDIA Driver 525+ with CUDA 12+
+- **Persistence Mode:** Enable with `nvidia-smi -pm 1` to prevent Xid 79 crashes
 
 ## 9.2 Docker Compose Setup
 
@@ -1618,6 +1743,9 @@ watch -n 1 nvidia-smi
 
 # GPU memory usage
 nvidia-smi --query-gpu=memory.used,memory.total --format=csv
+
+# Enable persistence mode (recommended)
+sudo nvidia-smi -pm 1
 ```
 
 ### 9.4.3 Health Checks
@@ -1665,7 +1793,9 @@ docker compose build --no-cache gateway
 ### 9.6.3 Database Initialization
 - Schema created automatically from `database/init.sql`
 - Seed data loaded on first run
-- Migrations in `database/migrations/` directory
+- Migrations in `database/migrations/` directory:
+  - `002_price_aggregator.sql` - Parts tables for damage estimation
+  - `003_drop_unused_price_tables.sql` - Removes old price tables (v3.0.0 cleanup)
 
 ---
 
@@ -1705,6 +1835,7 @@ curl -X POST "http://localhost:80/process" \
     "longitude": "number | null"
   },
   "vehicles": [{
+    "vin": "string (17 chars) | null",
     "registration": "string | null",
     "make": "string | null",
     "model": "string | null",
@@ -1994,7 +2125,24 @@ friction_coefficient: float (default: 0.7)
 
 ---
 
-### 10.3.4 GET /formulas
+### 10.3.4 POST /impact-energy
+
+Calculate impact energy, delta-V, and damage severity.
+
+**Response:**
+```json
+{
+  "total_impact_energy_j": 125000,
+  "energy_dissipated_j": 75000,
+  "delta_v_a_kmh": 30.6,
+  "delta_v_b_kmh": 25.9,
+  "estimated_damage_severity": "moderate"
+}
+```
+
+---
+
+### 10.3.5 GET /formulas
 
 Return all physics formulas used.
 
@@ -2022,9 +2170,86 @@ Return all physics formulas used.
 
 ---
 
-## 10.4 Car Value API
+## 10.4 Car Value API (v3.0.0)
 
-### 10.4.1 GET /value/{make}/{model}/{year}
+### 10.4.1 GET /vin/{vin}
+
+Decode VIN to get vehicle information.
+
+**Request:**
+```http
+GET /vin/WVWZZZ3CZWE123456 HTTP/1.1
+Host: localhost:8003
+```
+
+**Response:**
+```json
+{
+  "vin": "WVWZZZ3CZWE123456",
+  "valid": true,
+  "source": "nhtsa",
+  "make": "Volkswagen",
+  "model": "Golf",
+  "year": 2018,
+  "body_class": "Hatchback",
+  "drive_type": "Front Wheel Drive",
+  "engine_cylinders": "4",
+  "engine_displacement_l": "2.0",
+  "fuel_type": "Gasoline",
+  "plant_country": "Germany",
+  "check_digit_valid": true,
+  "from_cache": false
+}
+```
+
+**Error Response (invalid VIN):**
+```json
+{
+  "detail": "Invalid VIN format. Must be 17 alphanumeric characters (no I, O, Q)"
+}
+```
+
+---
+
+### 10.4.2 GET /value-by-vin/{vin}
+
+Get car value by VIN (decode + lookup).
+
+**Request:**
+```http
+GET /value-by-vin/WVWZZZ3CZWE123456 HTTP/1.1
+Host: localhost:8003
+```
+
+**Response:**
+```json
+{
+  "vin": "WVWZZZ3CZWE123456",
+  "vehicle": {
+    "vin": "WVWZZZ3CZWE123456",
+    "valid": true,
+    "source": "nhtsa",
+    "make": "Volkswagen",
+    "model": "Golf",
+    "year": 2018
+  },
+  "value": {
+    "make": "Volkswagen",
+    "model": "Golf",
+    "year": 2018,
+    "average_price_bgn": 28500.00,
+    "min_price_bgn": 22000,
+    "max_price_bgn": 35000,
+    "sample_size": 15,
+    "source": "cars.bg",
+    "currency": "BGN"
+  }
+}
+```
+
+---
+
+### 10.4.3 GET /value/{make}/{model}/{year}
 
 Get vehicle market value.
 
@@ -2052,9 +2277,22 @@ Host: localhost:8003
 }
 ```
 
+**Response (no data available):**
+```json
+{
+  "make": "SomeMake",
+  "model": "SomeModel",
+  "year": 2020,
+  "average_price_bgn": null,
+  "source": "none",
+  "currency": "BGN",
+  "note": "No market data available - manual valuation required"
+}
+```
+
 ---
 
-### 10.4.2 GET /parts/{make}/{category}
+### 10.4.4 GET /parts/{make}/{category}
 
 Get parts prices.
 
@@ -2088,7 +2326,7 @@ Host: localhost:8003
 
 ---
 
-### 10.4.3 GET /parts/estimate-damage
+### 10.4.5 GET /parts/estimate-damage
 
 Estimate total repair cost.
 
@@ -2111,41 +2349,6 @@ Host: localhost:8003
     {"part": "Headlight Left", "part_cost_bgn": 2000, "labor_cost_bgn": 50}
   ],
   "currency": "BGN"
-}
-```
-
----
-
-### 10.4.4 POST /admin/scrape/{source}
-
-Trigger scraping job (admin).
-
-**Request:**
-```http
-POST /admin/scrape/cars.bg?make=BMW HTTP/1.1
-Host: localhost:8003
-```
-
-**Response:**
-```json
-{
-  "status": "started",
-  "source": "cars.bg",
-  "make_filter": "BMW"
-}
-```
-
----
-
-### 10.4.5 POST /admin/aggregate
-
-Aggregate scraped data (admin).
-
-**Response:**
-```json
-{
-  "status": "completed",
-  "aggregated_entries": 1250
 }
 ```
 
@@ -2186,8 +2389,10 @@ Host: localhost:8002
 | `OCR failed: 503` | OCR service unavailable | Check `docker compose ps ocr` |
 | `LLM extraction failed` | vLLM not ready | Wait for model loading, check `docker compose logs llm` |
 | `Geocoding failed` | Nominatim import incomplete | Wait for OSM import to finish |
-| `Car value lookup failed` | Scraping blocked | Check rate limits, try later |
+| `Car value lookup failed` | Scraping blocked/timeout | Check rate limits, try later |
+| `Invalid VIN format` | VIN doesn't match 17-char pattern | Verify VIN has no I, O, Q characters |
 | `Physics analysis failed` | Invalid input data | Verify vehicle masses and angles |
+| `Xid 79 GPU crash` | GPU persistence mode disabled | Run `nvidia-smi -pm 1` |
 
 ## A.2 Performance Optimization
 
@@ -2197,6 +2402,7 @@ Host: localhost:8002
 | LLM timeout | Reduce max_tokens or document length |
 | Slow geocoding | Pre-warm Nominatim cache |
 | Car value slow | Prime Redis cache with common models |
+| GPU crashes | Enable persistence mode: `nvidia-smi -pm 1` |
 
 ---
 
@@ -2206,17 +2412,57 @@ Host: localhost:8002
 |---------|------|---------|
 | 1.0.0 | 2024-01 | Initial release |
 | 2.0.0 | 2024-06 | Added Momentum 360, Impact Theory, multi-source car values |
+| 2.0.0 | 2024-11 | Car Value Service v3.0.0: VIN decoding, on-demand scraping, removed DB storage. Gateway: VIN extraction in LLM prompt. Database: Removed unused price tables. LLM: 4 GPUs (was 6). |
 
 ---
 
-# Appendix C: License and Credits
+# Appendix C: Migration Notes (v2.0.0)
+
+## C.1 Car Value Service Changes (v2.0.0 to v3.0.0)
+
+### Removed Features
+- Database storage of scraped listings
+- Pre-computed price aggregates
+- Static fallback prices
+- Admin endpoints (`/admin/scrape`, `/admin/aggregate`)
+- Cron job (`scripts/price_updater.sh`)
+
+### Added Features
+- VIN decoding via NHTSA API (`/vin/{vin}`)
+- Combined VIN + value lookup (`/value-by-vin/{vin}`)
+- Permanent VIN caching in Redis
+
+### Database Migration
+Run migration `003_drop_unused_price_tables.sql` to remove:
+- `car_listings`
+- `car_prices_aggregated`
+- `car_price_history`
+- `scraper_runs`
+- `vehicle_prices`
+
+## C.2 Gateway Changes
+
+- VIN field added to vehicle extraction
+- LLM prompt updated with VIN instructions
+- VIN validation regex added to extractors
+- Schemas updated with VIN field
+
+## C.3 Infrastructure Changes
+
+- LLM now uses 4 GPUs (was 6)
+- GPU persistence mode recommended (`nvidia-smi -pm 1`)
+
+---
+
+# Appendix D: License and Credits
 
 - **OCR**: Tesseract (Apache 2.0)
 - **LLM**: Qwen3-32B (Apache 2.0)
 - **Geocoding**: Nominatim (GPL v2)
+- **VIN Decoding**: NHTSA vPIC API (Public Domain)
 - **Physics Formulas**: Bulgarian crash reconstruction methodology (l.xlsx)
 
 ---
 
-*Document generated: 2024*
-*Legal AI Technical Documentation v1.0.0*
+*Document generated: 2024-11*
+*Legal AI Technical Documentation v2.0.0*
