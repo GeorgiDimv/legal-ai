@@ -201,7 +201,7 @@ class QdrantRetriever:
             return {
                 "collection": COLLECTION_NAME,
                 "points_count": info.points_count,
-                "vectors_count": info.vectors_count,
+                "vectors_count": info.points_count,  # Each point has one vector
                 "status": info.status.value
             }
         except Exception as e:
