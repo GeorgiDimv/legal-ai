@@ -220,17 +220,17 @@ def process_pdf(
         # Chunk this page's text
         text_chunks = chunk_text(page_text, chunk_size, overlap)
 
-        for chunk_text in text_chunks:
-            if len(chunk_text.strip()) < 50:  # Skip very short chunks
+        for text_chunk in text_chunks:
+            if len(text_chunk.strip()) < 50:  # Skip very short chunks
                 continue
 
             chunk = DocumentChunk(
-                text=chunk_text,
+                text=text_chunk,
                 document=doc_type,
                 section=current_section,
-                article=extract_article_number(chunk_text),
+                article=extract_article_number(text_chunk),
                 page=page_num,
-                chunk_type=detect_chunk_type(chunk_text),
+                chunk_type=detect_chunk_type(text_chunk),
                 chunk_index=chunk_index
             )
             all_chunks.append(chunk)
