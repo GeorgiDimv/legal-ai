@@ -1,6 +1,7 @@
 
 services:
-  # vLLM with Qwen3-32B-AWQ (tensor-parallel across 6 GPUs for 16k context)
+  # vLLM with Qwen3-32B-AWQ (tensor-parallel across 4 GPUs)
+  # Note: 64 attention heads must be divisible by TP size (1,2,4,8 valid)
   llm:
     image: vllm/vllm-openai:latest
     ports:
@@ -11,8 +12,8 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     command: >
       --model Qwen/Qwen3-32B-AWQ
-      --tensor-parallel-size 6
-      --gpu-memory-utilization 0.85
+      --tensor-parallel-size 4
+      --gpu-memory-utilization 0.90
       --dtype auto
       --max-model-len 16384
       --quantization awq_marlin
@@ -25,7 +26,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 6
+              count: 4
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
