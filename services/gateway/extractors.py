@@ -342,6 +342,9 @@ def extract_vins_from_text(text: str) -> list[str]:
     Extract VINs from raw text using regex.
     VINs are exactly 17 characters, excluding I, O, Q.
     """
+    if not text:
+        return []
+
     # Look for VIN patterns - various label formats in Bulgarian and English
     vin_pattern = re.compile(
         r'(?:VIN|Рама\s*№?|Шаси\s*№?|vin|Vehicle\s+Identification)\s*[:\s]*([A-HJ-NPR-Z0-9]{17})',
@@ -371,6 +374,9 @@ def extract_damaged_parts_from_text(text: str) -> list[str]:
     """
     Extract damaged parts from Bulgarian damage descriptions using keyword matching.
     """
+    if not text:
+        return []
+
     # Bulgarian -> English part mappings
     part_keywords = {
         # Bumpers
