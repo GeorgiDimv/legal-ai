@@ -14,30 +14,32 @@ Legal AI is a document processing pipeline for Bulgarian automotive insurance cl
                     │   (FastAPI)     │
                     └────────┬────────┘
                              │
-   ┌───────────┬─────────────┼─────────────┬───────────┐
-   │           │             │             │           │
-   ▼           ▼             ▼             ▼           ▼
-┌───────┐ ┌───────┐   ┌───────────┐   ┌───────┐ ┌─────────┐
-│  OCR  │ │Physics│   │   vLLM    │   │  Car  │ │Nominatim│
-│:8001  │ │:8004  │   │   :8000   │   │ Value │ │  :8002  │
-└───────┘ └───────┘   └───────────┘   │ :8003 │ └─────────┘
-                             │        └───────┘
-                    ┌────────┴────────┐
-                    │                 │
-                    ▼                 ▼
-              ┌──────────┐      ┌──────────┐
+   ┌───────────┬─────────────┼─────────────┬───────────┬───────────┐
+   │           │             │             │           │           │
+   ▼           ▼             ▼             ▼           ▼           ▼
+┌───────┐ ┌───────┐   ┌───────────┐   ┌───────┐ ┌─────────┐ ┌───────┐
+│  OCR  │ │Physics│   │   vLLM    │   │  Car  │ │Nominatim│ │  RAG  │
+│:8001  │ │:8004  │   │   :8000   │   │ Value │ │  :8002  │ │ :8005 │
+└───────┘ └───────┘   └───────────┘   │ :8003 │ └─────────┘ └───┬───┘
+                             │        └───────┘                 │
+                    ┌────────┴────────┐                    ┌────┴────┐
+                    │                 │                    │ Qdrant  │
+                    ▼                 ▼                    │  :6333  │
+              ┌──────────┐      ┌──────────┐               └─────────┘
               │  Redis   │      │PostgreSQL│
               │  :6379   │      │  :5432   │
               └──────────┘      └──────────┘
 ```
 
 **Key Services:**
-- **Gateway** (`services/gateway/`): FastAPI orchestrator with `/process` and `/process-text` endpoints
+- **Gateway** (`services/gateway/`): FastAPI orchestrator with `/process`, `/process-text`, and `/generate-ate-report` endpoints
 - **OCR** (`services/ocr/`): PaddleOCR with Cyrillic language support for Bulgarian documents
-- **LLM**: vLLM serving Qwen3-32B-AWQ across 4 GPUs with tensor parallelism
+- **LLM**: vLLM serving Qwen3-32B-AWQ across 6 GPUs with tensor parallelism (16k context)
 - **Physics** (`services/physics/`): Crash reconstruction using Momentum 360 and Impact Theory formulas
 - **Car Value** (`services/car_value/`): On-demand price scraper with VIN decoding (cars.bg + mobile.bg + NHTSA API)
 - **Nominatim**: Geocoding service with Bulgaria OSM data (returns lat/lon coordinates)
+- **RAG** (`services/rag/`): Knowledge retrieval from ATE expert materials (Naredba 24, textbook)
+- **Qdrant**: Vector database for RAG embeddings
 - **PostgreSQL**: Stores processed claims
 - **Redis**: Caching layer for car values (24h TTL) and VIN decodes (permanent)
 
@@ -106,21 +108,25 @@ docker compose build physics
 | Nominatim  | 8002 | Geocoding (Bulgaria only)            |
 | Car Value  | 8003 | Vehicle market value lookup          |
 | Physics    | 8004 | Crash physics calculations           |
+| RAG        | 8005 | ATE knowledge retrieval              |
+| Qdrant     | 6333 | Vector database                      |
 | PostgreSQL | 5432 | Database                             |
 | Redis      | 6379 | Cache                                |
 
 ## Key Files
 
-- `services/gateway/main.py`: Main orchestration logic, `/process` and `/process-text` endpoints
+- `services/gateway/main.py`: Main orchestration logic, `/process`, `/process-text`, and `/generate-ate-report` endpoints
 - `services/gateway/extractors.py`: LLM prompt and JSON extraction logic (includes VIN extraction)
 - `services/gateway/schemas.py`: Pydantic models for API responses
 - `services/ocr/main.py`: PaddleOCR service with PDF/image support
 - `services/car_value/main.py`: On-demand scraper + VIN decoder (NHTSA API) with Redis caching
 - `services/physics/main.py`: Crash physics calculations (Momentum 360, Impact Theory)
+- `services/rag/main.py`: RAG service for ATE knowledge retrieval
+- `services/rag/ingest.py`: PDF processing and chunking for knowledge base
+- `services/rag/embeddings.py`: BGE-M3 embedding generation
+- `services/rag/retrieval.py`: Qdrant vector search
 - `database/init.sql`: PostgreSQL schema and seed data
-- `database/migrations/002_price_aggregator.sql`: Legacy migration (tables dropped)
-- `database/migrations/003_drop_unused_price_tables.sql`: Cleanup migration (removes price tables)
-- `database/migrations/004_drop_car_parts.sql`: Removes parts table (using LLM damage estimates)
+- `knowledge_base/`: Directory for ATE expert PDFs (Naredba 24, textbook)
 
 ## API Endpoints
 
@@ -130,6 +136,7 @@ docker compose build physics
 |----------|--------|-------|-------------|
 | `/process` | POST | PDF/image (multipart form) | Full pipeline: OCR → LLM → enrichment |
 | `/process-text` | POST | JSON `{"text": "..."}` | Skip OCR, direct text → LLM → enrichment |
+| `/generate-ate-report` | POST | JSON (processed_result or raw_text) | Generate professional ATE expert report |
 | `/health` | GET | - | Health check with service status |
 
 ## Data Flow
@@ -227,9 +234,84 @@ BMW, Mercedes-Benz, Audi, Volkswagen, Toyota, Opel, Ford, Renault, Peugeot, Skod
 3. Gateway searches Bulgarian websites for real-time parts prices
 4. Returns both LLM estimate and web-scraped parts breakdown
 
+## RAG Service (Автотехническа Експертиза Knowledge Base)
+
+The RAG service enables expert-level ATE report generation by providing relevant knowledge from:
+- **Naredba 24**: Bulgarian regulation governing ATE methodology
+- **Uchebnik ATE II**: Official textbook for certified automotive technical experts
+
+### Setup
+
+```bash
+# 1. Copy expert PDFs to knowledge_base directory
+cp "naredba 24.pdf" "Uchebnik full ATE II.pdf" knowledge_base/
+
+# 2. Start RAG and Qdrant services
+docker compose up -d qdrant rag
+
+# 3. Ingest the PDFs (one-time, ~30-60 min for 600+ pages)
+curl -X POST "http://localhost:8005/ingest-local?filename=naredba%2024.pdf"
+curl -X POST "http://localhost:8005/ingest-local?filename=Uchebnik%20full%20ATE%20II.pdf"
+
+# 4. Check indexing status
+curl http://localhost:8005/collections
+```
+
+### RAG Endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/ingest` | POST | Upload and index a PDF |
+| `/ingest-local` | POST | Index a PDF from knowledge_base/ |
+| `/search` | POST | Search for relevant knowledge chunks |
+| `/context` | POST | Get formatted context for LLM prompts |
+| `/collections` | GET | Get indexing statistics |
+| `/health` | GET | Service health check |
+
+### ATE Report Generation
+
+Generate professional Bulgarian ATE reports:
+
+```bash
+# Using processed result from /process
+curl -X POST http://localhost/generate-ate-report \
+  -H "Content-Type: application/json" \
+  -d '{
+    "processed_result": {...},
+    "expert_questions": [
+      "Какъв е механизмът на произшествието?",
+      "Каква е скоростта на МПС преди удара?"
+    ]
+  }'
+
+# Using raw text
+curl -X POST http://localhost/generate-ate-report \
+  -H "Content-Type: application/json" \
+  -d '{"raw_text": "..."}'
+```
+
+The report follows Bulgarian ATE standards with sections:
+1. Заглавна част (Header)
+2. Въведение (Introduction)
+3. Изследвана документация (Examined documents)
+4. Фактическа обстановка (Factual circumstances)
+5. Техническо изследване (Technical analysis)
+6. Изводи (Conclusions)
+7. Отговори на въпросите (Answers)
+
+### Technical Details
+
+- **Embedding Model**: BGE-M3 (multilingual, runs on CPU)
+- **Vector Database**: Qdrant (cosine similarity)
+- **Chunk Size**: 512 tokens with 50 token overlap
+- **Retrieval**: Top 5-8 most relevant chunks per query
+- **Context Budget**: ~3000 tokens for RAG context in 16k window
+
 ## Notes
 
-- LLM requires 4 GPUs with tensor parallelism; first startup downloads ~20GB model
+- LLM requires 6 GPUs with tensor parallelism; first startup downloads ~20GB model
+- LLM context window increased to 16k tokens (from 8k) with 6 GPUs
+- RAG embedding model runs on CPU to preserve GPU for LLM
 - Nominatim takes 30-60 minutes on first run to import Bulgaria OSM data
 - All monetary values are in Bulgarian Lev (BGN)
 - OCR runs in CPU mode to reserve GPUs for LLM

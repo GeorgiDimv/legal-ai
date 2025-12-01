@@ -1,6 +1,6 @@
 
 services:
-  # vLLM with Qwen3-32B-AWQ (tensor-parallel across 4 GPUs - 64 heads / 4 = 16)
+  # vLLM with Qwen3-32B-AWQ (tensor-parallel across 6 GPUs for 16k context)
   llm:
     image: vllm/vllm-openai:latest
     ports:
@@ -11,10 +11,10 @@ services:
       - HUGGING_FACE_HUB_TOKEN=${HF_TOKEN}
     command: >
       --model Qwen/Qwen3-32B-AWQ
-      --tensor-parallel-size 4
+      --tensor-parallel-size 6
       --gpu-memory-utilization 0.85
       --dtype auto
-      --max-model-len 8192
+      --max-model-len 16384
       --quantization awq_marlin
       --trust-remote-code
       --max-num-seqs 8
@@ -25,7 +25,7 @@ services:
         reservations:
           devices:
             - driver: nvidia
-              count: 4
+              count: 6
               capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
@@ -139,6 +139,7 @@ services:
       - NOMINATIM_URL=http://nominatim:8080
       - CAR_VALUE_URL=http://car_value:8003
       - PHYSICS_URL=http://physics:8004
+      - RAG_URL=http://rag:8005
       - DATABASE_URL=postgresql://${POSTGRES_USER:-legal_ai}:${POSTGRES_PASSWORD:-changeme}@postgres:5432/legal_ai
       - REDIS_URL=redis://redis:6379
       - REQUEST_TIMEOUT=300
@@ -150,6 +151,7 @@ services:
       - physics
       - postgres
       - redis
+      - rag
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:80/health"]
@@ -172,8 +174,42 @@ services:
       - llm
     restart: unless-stopped
 
+  # Qdrant Vector Database for RAG
+  qdrant:
+    image: qdrant/qdrant:latest
+    ports:
+      - "6333:6333"
+    volumes:
+      - qdrant-data:/qdrant/storage
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:6333/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # RAG Service for ATE Knowledge Base
+  rag:
+    build: ./services/rag
+    ports:
+      - "8005:8005"
+    environment:
+      - QDRANT_HOST=qdrant
+      - QDRANT_PORT=6333
+    volumes:
+      - ./knowledge_base:/app/knowledge_base
+    depends_on:
+      - qdrant
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
 volumes:
   postgres-data:
   redis-data:
   nominatim-data:
   webui-data:
+  qdrant-data:

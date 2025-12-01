@@ -52,6 +52,7 @@ OCR_URL = os.environ.get("OCR_URL", "http://localhost:8001")
 NOMINATIM_URL = os.environ.get("NOMINATIM_URL", "http://localhost:8002")
 CAR_VALUE_URL = os.environ.get("CAR_VALUE_URL", "http://localhost:8003")
 PHYSICS_URL = os.environ.get("PHYSICS_URL", "http://localhost:8004")
+RAG_URL = os.environ.get("RAG_URL", "http://localhost:8005")
 DATABASE_URL = os.environ.get("DATABASE_URL")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379")
 REQUEST_TIMEOUT = int(os.environ.get("REQUEST_TIMEOUT", "300"))
@@ -952,10 +953,211 @@ async def root():
         "version": "1.0.0",
         "endpoints": {
             "/process": "POST - Process insurance claim document",
+            "/process-text": "POST - Process raw text (skip OCR)",
+            "/generate-ate-report": "POST - Generate expert ATE report",
             "/health": "GET - Health check"
         },
         "supported_formats": ["PDF", "PNG", "JPG", "JPEG", "TIFF"]
     }
+
+
+# ============== RAG Integration ==============
+
+async def get_ate_context(query: str, limit: int = 5) -> dict:
+    """
+    Retrieve relevant ATE knowledge from RAG service.
+
+    Args:
+        query: Query text (usually OCR text or case description)
+        limit: Maximum number of chunks to retrieve
+
+    Returns:
+        Dict with 'context' (formatted text) and 'sources' (references)
+    """
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(
+                f"{RAG_URL}/context",
+                json={
+                    "query": query[:2000],  # Limit query length
+                    "limit": limit,
+                    "score_threshold": 0.4
+                }
+            )
+
+            if response.status_code == 200:
+                return response.json()
+            else:
+                logger.warning(f"RAG service returned {response.status_code}")
+
+    except Exception as e:
+        logger.warning(f"RAG context retrieval failed: {e}")
+
+    return {"context": "", "sources": [], "count": 0}
+
+
+class ATEReportRequest(BaseModel):
+    """Request model for ATE report generation."""
+    # Can provide either processed result or raw text
+    processed_result: Optional[dict] = None
+    raw_text: Optional[str] = None
+    # Additional context
+    expert_questions: Optional[list[str]] = None  # Questions for the expert to answer
+    include_physics: bool = True
+    include_methodology: bool = True
+
+
+class ATEReportResponse(BaseModel):
+    """Response model for ATE report."""
+    report_text: str
+    report_sections: dict
+    sources_cited: list[dict]
+    processing_time_seconds: float
+
+
+@app.post("/generate-ate-report", response_model=ATEReportResponse)
+async def generate_ate_report(request: ATEReportRequest):
+    """
+    Generate a professional Автотехническа Експертиза (ATE) report.
+
+    This endpoint creates an expert-level technical report following
+    Bulgarian ATE standards, citing Naredba 24 and proper methodology.
+
+    Input: Either a processed_result from /process endpoint, or raw_text
+
+    Returns: Full ATE report with proper structure and citations.
+    """
+    start_time = time.time()
+
+    # Get case data
+    if request.processed_result:
+        case_data = request.processed_result
+        raw_text = case_data.get("raw_ocr_text", "")
+    elif request.raw_text:
+        # Process the text first
+        raw_text = request.raw_text
+        try:
+            extracted = await extract_with_llm(llm_client, LLM_MODEL, raw_text)
+            case_data = extracted
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to extract data: {e}")
+    else:
+        raise HTTPException(status_code=400, detail="Provide either processed_result or raw_text")
+
+    # Get relevant ATE knowledge from RAG
+    rag_context = await get_ate_context(raw_text, limit=8)
+    ate_knowledge = rag_context.get("context", "")
+    sources = rag_context.get("sources", [])
+
+    logger.info(f"Retrieved {rag_context.get('count', 0)} RAG chunks for report")
+
+    # Build the expert questions section
+    expert_questions = request.expert_questions or [
+        "Какъв е механизмът на произшествието?",
+        "Каква е скоростта на движение на МПС преди удара?",
+        "Кой от участниците е имал възможност да предотврати произшествието?",
+        "Какви са техническите причини за произшествието?"
+    ]
+
+    # Generate ATE report using LLM with RAG context
+    report_prompt = f"""Вие сте сертифициран автотехнически експерт в България.
+Използвайки предоставените регулаторни и методологични референции, генерирайте
+професионална Автотехническа Експертиза (АТЕ).
+
+РЕГУЛАТОРНИ И МЕТОДОЛОГИЧНИ РЕФЕРЕНЦИИ:
+{ate_knowledge}
+
+ДАННИ ЗА СЛУЧАЯ:
+{json.dumps(case_data, indent=2, ensure_ascii=False, default=str)}
+
+ВЪПРОСИ ЗА ОТГОВОР:
+{chr(10).join(f'{i+1}. {q}' for i, q in enumerate(expert_questions))}
+
+Генерирайте пълен АТЕ доклад със следните раздели:
+
+1. ЗАГЛАВНА ЧАСТ
+   - Заглавие на експертизата
+   - Номер на дело/преписка (ако е наличен)
+   - Дата на изготвяне
+
+2. ВЪВЕДЕНИЕ
+   - Основание за назначаване
+   - Поставени задачи/въпроси
+
+3. ИЗСЛЕДВАНА ДОКУМЕНТАЦИЯ
+   - Списък на разгледаните документи
+
+4. ФАКТИЧЕСКА ОБСТАНОВКА
+   - Описание на местопроизшествието
+   - Описание на участниците и МПС
+   - Описание на щетите
+
+5. ТЕХНИЧЕСКО ИЗСЛЕДВАНЕ
+   - Анализ на механизма на ПТП
+   - Изчисляване на скорости (с формули)
+   - Анализ на възможността за предотвратяване
+   - Цитирайте конкретни членове от Наредба 24 където е приложимо
+
+6. ИЗВОДИ
+   - Основни заключения
+   - Технически причини
+
+7. ОТГОВОРИ НА ВЪПРОСИТЕ
+   - Подробен отговор на всеки поставен въпрос
+
+Форматирайте доклада на български език, използвайки професионална терминология.
+Цитирайте конкретни членове от Наредба 24 и методологични референции.
+Включете формули за изчисления където е приложимо.
+
+Върнете отговора като JSON с полета:
+- "report_text": пълният текст на доклада
+- "sections": обект с ключове за всеки раздел (zaglawna_chast, vywedenie, dokumentacia, fakticheska_obstanowka, tehnichesko_izsledvane, izvodi, otgovori)
+"""
+
+    try:
+        response = await llm_client.chat.completions.create(
+            model=LLM_MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Вие сте сертифициран автотехнически експерт със специализация в анализа на пътнотранспортни произшествия по българското законодателство. Отговаряте на български език."
+                },
+                {
+                    "role": "user",
+                    "content": report_prompt
+                }
+            ],
+            temperature=0.3,
+            max_tokens=8000,
+            response_format={"type": "json_object"}
+        )
+
+        content = response.choices[0].message.content
+        if not content:
+            raise HTTPException(status_code=500, detail="LLM returned empty response")
+
+        # Parse response
+        try:
+            report_data = json.loads(content)
+        except json.JSONDecodeError:
+            # If not valid JSON, treat as plain text
+            report_data = {
+                "report_text": content,
+                "sections": {}
+            }
+
+        processing_time = time.time() - start_time
+
+        return ATEReportResponse(
+            report_text=report_data.get("report_text", content),
+            report_sections=report_data.get("sections", {}),
+            sources_cited=sources,
+            processing_time_seconds=round(processing_time, 2)
+        )
+
+    except Exception as e:
+        logger.error(f"ATE report generation failed: {e}")
+        raise HTTPException(status_code=500, detail=f"Report generation failed: {e}")
 
 
 if __name__ == "__main__":
