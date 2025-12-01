@@ -170,18 +170,18 @@ class QdrantRetriever:
         if filter_conditions:
             search_filter = models.Filter(must=filter_conditions)
 
-        # Execute search
-        results = self.client.search(
+        # Execute search (qdrant-client >= 1.9.0 uses query_points)
+        results = self.client.query_points(
             collection_name=COLLECTION_NAME,
-            query_vector=query_vector,
+            query=query_vector,
             query_filter=search_filter,
             limit=limit,
             score_threshold=score_threshold
         )
 
-        # Format results
+        # Format results (results.points contains the matches)
         formatted = []
-        for r in results:
+        for r in results.points:
             formatted.append({
                 "text": r.payload.get("text", ""),
                 "document": r.payload.get("document", ""),
