@@ -189,7 +189,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # RAG Service for ATE Knowledge Base
+  # RAG Service for ATE Knowledge Base (GPU-accelerated embeddings)
   rag:
     build: ./services/rag
     ports:
@@ -197,16 +197,25 @@ services:
     environment:
       - QDRANT_HOST=qdrant
       - QDRANT_PORT=6333
+      - USE_GPU=true
     volumes:
       - ./knowledge_base:/app/knowledge_base
     depends_on:
       - qdrant
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8005/health"]
       interval: 30s
-      timeout: 10s
-      retries: 3
+      timeout: 60s
+      retries: 5
+      start_period: 120s
 
 volumes:
   postgres-data:
