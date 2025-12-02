@@ -274,18 +274,49 @@ async def call_ocr_service(file: UploadFile) -> dict:
         return response.json()
 
 
+def clean_bulgarian_address(address: str) -> str:
+    """Clean Bulgarian address for better geocoding results."""
+    import re
+    if not address:
+        return ""
+
+    # Remove quotes around street names
+    address = re.sub(r'["\'\„\"]', '', address)
+
+    # Remove intersection info (кръстовище с = intersection with)
+    address = re.sub(r',?\s*кръстовище\s+с\s+.*$', '', address, flags=re.IGNORECASE)
+
+    # Replace № with space
+    address = address.replace('№', ' ')
+
+    # Clean up multiple spaces
+    address = re.sub(r'\s+', ' ', address).strip()
+
+    # Expand common abbreviations
+    address = re.sub(r'\bбул\.\s*', 'булевард ', address, flags=re.IGNORECASE)
+    address = re.sub(r'\bул\.\s*', 'улица ', address, flags=re.IGNORECASE)
+    address = re.sub(r'\bгр\.\s*', '', address, flags=re.IGNORECASE)  # Remove city prefix
+
+    return address
+
+
 async def geocode_location(location: dict) -> dict:
     """Geocode an address using Nominatim."""
     query_parts = []
     if location.get("address"):
-        query_parts.append(location["address"])
+        cleaned_address = clean_bulgarian_address(location["address"])
+        if cleaned_address:
+            query_parts.append(cleaned_address)
     if location.get("city"):
-        query_parts.append(location["city"])
+        city = clean_bulgarian_address(location["city"])
+        if city:
+            query_parts.append(city)
 
     if not query_parts:
         return {}
 
     query = ", ".join(query_parts) + ", Bulgaria"
+    logger.info(f"Geocoding query: {query}")
 
     async with httpx.AsyncClient(timeout=10) as client:
         response = await client.get(
@@ -748,23 +779,23 @@ async def process_extraction_result(
 
             physics_result = await calculate_momentum_360(
                 vehicle_a={
-                    "mass_kg": v_a.get("mass_kg", 1400),
-                    "post_impact_travel_m": v_a.get("post_impact_travel_m", 5),
+                    "mass_kg": v_a.get("mass_kg") or 1400,
+                    "post_impact_travel_m": v_a.get("post_impact_travel_m") or 5.0,
                     "alpha_deg": v_a.get("pre_impact_angle_deg") or defaults["a_alpha"],
                     "beta_deg": v_a.get("post_impact_angle_deg") or defaults["a_beta"],
                     "final_velocity_ms": 0
                 },
                 vehicle_b={
-                    "mass_kg": v_b.get("mass_kg", 1400),
-                    "post_impact_travel_m": v_b.get("post_impact_travel_m", 5),
+                    "mass_kg": v_b.get("mass_kg") or 1400,
+                    "post_impact_travel_m": v_b.get("post_impact_travel_m") or 5.0,
                     "alpha_deg": v_b.get("pre_impact_angle_deg") or defaults["b_alpha"],
                     "beta_deg": v_b.get("post_impact_angle_deg") or defaults["b_beta"],
                     "final_velocity_ms": 0
                 },
                 friction_coefficient=friction,
-                grade_percent=collision_details.get("road_grade_percent", 0),
-                restitution_coefficient=collision_details.get("restitution_coefficient", 0.4),
-                alpha_s_deg=collision_details.get("impact_angle_deg", 0)
+                grade_percent=collision_details.get("road_grade_percent") or 0,
+                restitution_coefficient=collision_details.get("restitution_coefficient") or 0.4,
+                alpha_s_deg=collision_details.get("impact_angle_deg") or 0
             )
 
             if physics_result:
@@ -902,6 +933,7 @@ async def enrich_with_car_values(case_data: dict) -> dict:
 async def enrich_with_physics(case_data: dict) -> dict:
     """Add physics analysis to case_data dict if sufficient data available."""
     vehicles = case_data.get("vehicles", [])
+    collision_details = case_data.get("collision_details") or {}
 
     # Need at least 2 vehicles for Momentum 360 analysis
     if len(vehicles) >= 2:
@@ -910,24 +942,38 @@ async def enrich_with_physics(case_data: dict) -> dict:
         if v1.get("mass_kg") and v2.get("mass_kg"):
             try:
                 # Build vehicle dicts matching VehiclePhysics schema
+                # Use 'or' to handle explicit None values from JSON
                 vehicle_a = {
                     "mass_kg": v1["mass_kg"],
-                    "post_impact_travel_m": v1.get("post_impact_travel_m", 0),
-                    "alpha_deg": v1.get("pre_impact_angle_deg", 0),
-                    "beta_deg": v1.get("post_impact_angle_deg", 0),
+                    "post_impact_travel_m": v1.get("post_impact_travel_m") or 5.0,
+                    "alpha_deg": v1.get("pre_impact_angle_deg") or 0,
+                    "beta_deg": v1.get("post_impact_angle_deg") or 0,
                     "final_velocity_ms": 0
                 }
                 vehicle_b = {
                     "mass_kg": v2["mass_kg"],
-                    "post_impact_travel_m": v2.get("post_impact_travel_m", 0),
-                    "alpha_deg": v2.get("pre_impact_angle_deg", 180),
-                    "beta_deg": v2.get("post_impact_angle_deg", 180),
+                    "post_impact_travel_m": v2.get("post_impact_travel_m") or 5.0,
+                    "alpha_deg": v2.get("pre_impact_angle_deg") or 180,
+                    "beta_deg": v2.get("post_impact_angle_deg") or 180,
                     "final_velocity_ms": 0
                 }
+                # Get physics parameters from collision_details with safe defaults
+                friction = 0.7
+                road_surface = collision_details.get("road_surface")
+                if road_surface:
+                    friction_map = {
+                        "dry_asphalt": 0.7, "wet_asphalt": 0.5,
+                        "gravel": 0.4, "snow": 0.2, "ice": 0.1
+                    }
+                    friction = friction_map.get(road_surface, 0.7)
+
                 physics_result = await calculate_momentum_360(
                     vehicle_a=vehicle_a,
                     vehicle_b=vehicle_b,
-                    friction_coefficient=0.7
+                    friction_coefficient=friction,
+                    grade_percent=collision_details.get("road_grade_percent") or 0,
+                    restitution_coefficient=collision_details.get("restitution_coefficient") or 0.4,
+                    alpha_s_deg=collision_details.get("impact_angle_deg") or 0
                 )
                 if physics_result:
                     case_data["physics_analysis"] = physics_result
