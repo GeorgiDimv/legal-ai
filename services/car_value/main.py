@@ -314,9 +314,10 @@ async def get_car_value(make: str, model: str, year: int):
 
     Strategy:
     1. Check Redis cache
-    2. Scrape BOTH cars.bg and mobile.bg in parallel
-    3. Merge prices for better confidence
-    4. Return combined result
+    2. Scrape BOTH cars.bg and mobile.bg in parallel with exact year
+    3. If no results, fallback to ±2 year range
+    4. Merge prices for better confidence
+    5. Return combined result
     """
     # Normalize inputs
     make = make.strip()
@@ -325,7 +326,7 @@ async def get_car_value(make: str, model: str, year: int):
     if year < 1990 or year > CURRENT_YEAR + 1:
         raise HTTPException(status_code=400, detail=f"Invalid year: {year}")
 
-    cache_key = f"car:v4:{make.lower()}:{model.lower()}:{year}"
+    cache_key = f"car:v5:{make.lower()}:{model.lower()}:{year}"
 
     # 1. Check cache
     if redis_client:
@@ -339,13 +340,28 @@ async def get_car_value(make: str, model: str, year: int):
         except Exception as e:
             logger.warning(f"Redis read error: {e}")
 
-    # 2. Scrape BOTH sites in parallel for better confidence
-    cars_bg_task = scrape_cars_bg(make, model, year)
-    mobile_bg_task = scrape_mobile_bg(make, model, year)
+    # 2. First try exact year
+    cars_bg_task = scrape_cars_bg(make, model, year, year_range=0)
+    mobile_bg_task = scrape_mobile_bg(make, model, year, year_range=0)
 
     results = await asyncio.gather(cars_bg_task, mobile_bg_task, return_exceptions=True)
     cars_bg_result = results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])}
     mobile_bg_result = results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])}
+    year_range_used = 0
+
+    # 3. If no results from exact year, try ±2 year range
+    cars_has_results = not cars_bg_result.get("error") and cars_bg_result.get("sample_size", 0) > 0
+    mobile_has_results = not mobile_bg_result.get("error") and mobile_bg_result.get("sample_size", 0) > 0
+
+    if not cars_has_results and not mobile_has_results:
+        logger.info(f"No results for exact year {year}, trying ±2 year range")
+        cars_bg_task = scrape_cars_bg(make, model, year, year_range=2)
+        mobile_bg_task = scrape_mobile_bg(make, model, year, year_range=2)
+
+        results = await asyncio.gather(cars_bg_task, mobile_bg_task, return_exceptions=True)
+        cars_bg_result = results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])}
+        mobile_bg_result = results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])}
+        year_range_used = 2
 
     # 3. Merge prices from both sources
     all_prices = []
@@ -393,6 +409,7 @@ async def get_car_value(make: str, model: str, year: int):
         "make": make,
         "model": model,
         "year": year,
+        "year_range": f"{year - year_range_used}-{year + year_range_used}" if year_range_used > 0 else str(year),
         "average_price_bgn": avg_price,
         "min_price_bgn": min(all_mins) if all_mins else None,
         "max_price_bgn": max(all_maxs) if all_maxs else None,
@@ -405,6 +422,10 @@ async def get_car_value(make: str, model: str, year: int):
             "mobile_bg": mobile_bg_result if not mobile_bg_result.get("error") else None
         }
     }
+
+    # Add note if year range fallback was used
+    if year_range_used > 0:
+        result["note"] = f"No exact {year} listings found, using {year - year_range_used}-{year + year_range_used} range"
 
     cache_result(cache_key, result, PRICE_CACHE_TTL)
     return result
@@ -449,17 +470,28 @@ async def get_car_value_by_vin(vin: str):
     }
 
 
-async def scrape_cars_bg(make: str, model: str, year: int) -> dict:
-    """Scrape cars.bg for current market prices."""
+async def scrape_cars_bg(make: str, model: str, year: int, year_range: int = 0) -> dict:
+    """
+    Scrape cars.bg for current market prices.
+
+    Args:
+        make: Car manufacturer
+        model: Car model
+        year: Target year
+        year_range: Search year ± this value (default 0 = exact year only)
+    """
     try:
         search_url = "https://www.cars.bg/carslist.php"
+
+        year_from = year - year_range
+        year_to = year + year_range
 
         params = {
             "mession": "search",
             "make": make,
             "model": model,
-            "yearFrom": str(year),
-            "yearTo": str(year),
+            "yearFrom": str(year_from),
+            "yearTo": str(year_to),
             "currencyId": "1",
         }
 
@@ -524,8 +556,16 @@ async def scrape_cars_bg(make: str, model: str, year: int) -> dict:
         return {"error": str(e)}
 
 
-async def scrape_mobile_bg(make: str, model: str, year: int) -> dict:
-    """Scrape mobile.bg for current market prices."""
+async def scrape_mobile_bg(make: str, model: str, year: int, year_range: int = 0) -> dict:
+    """
+    Scrape mobile.bg for current market prices.
+
+    Args:
+        make: Car manufacturer
+        model: Car model
+        year: Target year
+        year_range: Search year ± this value (default 0 = exact year only)
+    """
     try:
         SLUGS = {
             "volkswagen": "vw",
@@ -541,7 +581,9 @@ async def scrape_mobile_bg(make: str, model: str, year: int) -> dict:
         if model_slug:
             url += f"/{model_slug}"
 
-        params = {"yearFrom": str(year), "yearTo": str(year)}
+        year_from = year - year_range
+        year_to = year + year_range
+        params = {"yearFrom": str(year_from), "yearTo": str(year_to)}
         headers = {"User-Agent": USER_AGENT, "Accept-Language": "bg-BG,bg;q=0.9"}
 
         async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
@@ -557,27 +599,63 @@ async def scrape_mobile_bg(make: str, model: str, year: int) -> dict:
 
             prices = []
 
-            # BGN prices
-            for match in re.findall(r'(\d{1,3}(?:\s?\d{3})*)\s*(?:лв|BGN)', html):
+            # Split HTML into listing blocks to validate year for each
+            # Mobile.bg shows year as "Месец YYYY г." format
+            # Skip TOP/promoted listings which ignore year filters
+
+            # Pattern to find listing blocks with price and year
+            # Look for price followed by year in the same context
+            listing_pattern = re.compile(
+                r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:лв|BGN|€|EUR).*?'  # Price
+                r'(?:Януари|Февруари|Март|Април|Май|Юни|Юли|Август|Септември|Октомври|Ноември|Декември|\d{2}/)\s*(\d{4})\s*г\.',  # Year
+                re.DOTALL | re.IGNORECASE
+            )
+
+            for match in listing_pattern.findall(html):
                 try:
-                    price = int(match.replace(' ', '').replace('\xa0', ''))
+                    price_str, listing_year_str = match
+                    listing_year = int(listing_year_str)
+
+                    # Skip if year doesn't match our target range
+                    if listing_year < year_from or listing_year > year_to:
+                        logger.debug(f"Skipping mobile.bg listing: year {listing_year} not in {year_from}-{year_to}")
+                        continue
+
+                    price = int(price_str.replace(' ', '').replace('\xa0', '').replace('.', '').replace(',', ''))
+
+                    # Convert EUR to BGN if needed (check if original had € or EUR)
+                    # For now assume BGN since we're matching лв|BGN first
+
                     if 1000 < price < 500000:
                         prices.append(price)
-                except:
+                except Exception as e:
+                    logger.debug(f"mobile.bg parse error: {e}")
                     continue
 
-            # EUR prices
-            for match in re.findall(r'(\d{1,3}(?:\s?\d{3})*)\s*EUR', html):
-                try:
-                    price = int(match.replace(' ', '').replace('\xa0', ''))
-                    price_bgn = int(price * 1.96)
-                    if 1000 < price_bgn < 500000:
-                        prices.append(price_bgn)
-                except:
-                    continue
+            # Fallback: if pattern matching found nothing, try simpler extraction
+            # but only for non-TOP listings (skip first few results which are usually TOP)
+            if not prices:
+                # Try EUR prices with year validation
+                eur_pattern = re.compile(
+                    r'(\d{1,3}(?:[\s\xa0]?\d{3})*)\s*(?:€|EUR).*?'
+                    r'(?:\d{2}/|\w+\s+)(\d{4})\s*г\.',
+                    re.DOTALL
+                )
+                for match in eur_pattern.findall(html):
+                    try:
+                        price_str, listing_year_str = match
+                        listing_year = int(listing_year_str)
+                        if listing_year < year_from or listing_year > year_to:
+                            continue
+                        price = int(price_str.replace(' ', '').replace('\xa0', ''))
+                        price_bgn = int(price * 1.96)
+                        if 1000 < price_bgn < 500000:
+                            prices.append(price_bgn)
+                    except:
+                        continue
 
             if not prices:
-                return {"error": "No listings found"}
+                return {"error": "No listings found matching year filter"}
 
             prices = filter_outliers(prices)
 

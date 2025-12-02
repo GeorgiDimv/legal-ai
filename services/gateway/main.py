@@ -301,27 +301,97 @@ def clean_bulgarian_address(address: str) -> str:
 
 
 async def geocode_location(location: dict) -> dict:
-    """Geocode an address using Nominatim with fallback for house numbers."""
+    """
+    Geocode an address using Nominatim structured search.
+
+    Uses structured parameters (street=, city=) for more accurate results
+    than free-form queries. Falls back to street-only if full address fails.
+    """
     import re as re_module
 
-    query_parts = []
+    # Extract and clean address components
+    street = ""
+    city = ""
+
     if location.get("address"):
-        cleaned_address = clean_bulgarian_address(location["address"])
-        if cleaned_address:
-            query_parts.append(cleaned_address)
+        street = clean_bulgarian_address(location["address"])
     if location.get("city"):
         city = clean_bulgarian_address(location["city"])
-        if city:
-            query_parts.append(city)
 
-    if not query_parts:
+    if not street and not city:
         return {}
 
-    query = ", ".join(query_parts) + ", Bulgaria"
-    logger.info(f"Geocoding query: {query}")
-
     async with httpx.AsyncClient(timeout=10) as client:
-        # Try with full address first
+        # Strategy 1: Structured search with street and city
+        if street and city:
+            params = {
+                "street": street,
+                "city": city,
+                "country": "Bulgaria",
+                "format": "json",
+                "limit": 5,  # Get multiple results to filter
+                "addressdetails": 1
+            }
+            logger.info(f"Geocoding structured: street='{street}', city='{city}'")
+
+            response = await client.get(f"{NOMINATIM_URL}/search", params=params)
+
+            if response.status_code == 200:
+                results = response.json()
+                # Filter to prefer road/street results over shops/POIs
+                for r in results:
+                    if r.get("class") in ("highway", "place", "boundary"):
+                        logger.info(f"Geocoding found street: {r.get('display_name', '')[:60]}")
+                        return {
+                            "lat": float(r["lat"]),
+                            "lon": float(r["lon"])
+                        }
+                # If no road found, use first result
+                if results:
+                    logger.info(f"Geocoding using first result: {results[0].get('display_name', '')[:60]}")
+                    return {
+                        "lat": float(results[0]["lat"]),
+                        "lon": float(results[0]["lon"])
+                    }
+
+        # Strategy 2: Try with street only (without house numbers) in city
+        if street:
+            street_no_numbers = re_module.sub(r'\s*\d+\s*', ' ', street).strip()
+            street_no_numbers = re_module.sub(r'\s+', ' ', street_no_numbers)  # Clean double spaces
+
+            if street_no_numbers:
+                params = {
+                    "street": street_no_numbers,
+                    "city": city if city else "София",  # Default to Sofia
+                    "country": "Bulgaria",
+                    "format": "json",
+                    "limit": 5,
+                    "addressdetails": 1
+                }
+                logger.info(f"Geocoding fallback: street='{street_no_numbers}', city='{params['city']}'")
+
+                response = await client.get(f"{NOMINATIM_URL}/search", params=params)
+
+                if response.status_code == 200:
+                    results = response.json()
+                    # Prefer highway/road results
+                    for r in results:
+                        if r.get("class") in ("highway", "place"):
+                            logger.info(f"Geocoding found road: {r.get('display_name', '')[:60]}")
+                            return {
+                                "lat": float(r["lat"]),
+                                "lon": float(r["lon"])
+                            }
+                    if results:
+                        return {
+                            "lat": float(results[0]["lat"]),
+                            "lon": float(results[0]["lon"])
+                        }
+
+        # Strategy 3: Free-form search as last resort
+        query = f"{street}, {city}, Bulgaria" if city else f"{street}, Bulgaria"
+        logger.info(f"Geocoding free-form fallback: {query}")
+
         response = await client.get(
             f"{NOMINATIM_URL}/search",
             params={
@@ -339,33 +409,6 @@ async def geocode_location(location: dict) -> dict:
                     "lat": float(results[0]["lat"]),
                     "lon": float(results[0]["lon"])
                 }
-
-        # Fallback: try without house numbers (Nominatim often can't find specific addresses)
-        # Remove numbers from address part
-        if query_parts:
-            address_no_numbers = re_module.sub(r'\s*\d+\s*', ' ', query_parts[0]).strip()
-            if address_no_numbers != query_parts[0]:
-                fallback_parts = [address_no_numbers] + query_parts[1:]
-                fallback_query = ", ".join(fallback_parts) + ", Bulgaria"
-                logger.info(f"Geocoding fallback query: {fallback_query}")
-
-                response = await client.get(
-                    f"{NOMINATIM_URL}/search",
-                    params={
-                        "q": fallback_query,
-                        "format": "json",
-                        "limit": 1,
-                        "countrycodes": "bg"
-                    }
-                )
-
-                if response.status_code == 200:
-                    results = response.json()
-                    if results:
-                        return {
-                            "lat": float(results[0]["lat"]),
-                            "lon": float(results[0]["lon"])
-                        }
 
     return {}
 
