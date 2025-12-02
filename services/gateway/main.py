@@ -1178,11 +1178,12 @@ async def generate_ate_report(request: ATEReportRequest):
             logger.info(f"Report data size: {len(report_data_json)} chars")
 
             # Extract physics values for explicit injection (LLM tends to ignore nested JSON)
+            # Try both field naming conventions (PhysicsAnalysis vs raw physics service response)
             physics = report_data.get("physics_analysis", {})
-            speed_a = physics.get("vehicle_a_pre_impact_kmh", "неизвестна")
-            speed_b = physics.get("vehicle_b_pre_impact_kmh", "неизвестна")
-            delta_v = physics.get("delta_v_a_kmh", "неизвестна")
-            physics_method = physics.get("physics_method", "неизвестен")
+            speed_a = physics.get("vehicle_a_pre_impact_kmh") or physics.get("vehicle_a_impact_velocity_kmh") or "неизвестна"
+            speed_b = physics.get("vehicle_b_pre_impact_kmh") or physics.get("vehicle_b_impact_velocity_kmh") or "неизвестна"
+            delta_v = physics.get("delta_v_a_kmh") or "неизвестна"
+            physics_method = physics.get("physics_method") or physics.get("method") or "неизвестен"
 
             # Generate ATE report using LLM with RAG context
             report_prompt = f"""/no_think
