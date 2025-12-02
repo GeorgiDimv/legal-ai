@@ -314,9 +314,9 @@ async def get_car_value(make: str, model: str, year: int):
 
     Strategy:
     1. Check Redis cache
-    2. Try live scraping (cars.bg)
-    3. Try mobile.bg as backup
-    4. Return vehicle info only (no price) if scraping fails
+    2. Scrape BOTH cars.bg and mobile.bg in parallel
+    3. Merge prices for better confidence
+    4. Return combined result
     """
     # Normalize inputs
     make = make.strip()
@@ -325,7 +325,7 @@ async def get_car_value(make: str, model: str, year: int):
     if year < 1990 or year > CURRENT_YEAR + 1:
         raise HTTPException(status_code=400, detail=f"Invalid year: {year}")
 
-    cache_key = f"car:v3:{make.lower()}:{model.lower()}:{year}"
+    cache_key = f"car:v4:{make.lower()}:{model.lower()}:{year}"
 
     # 1. Check cache
     if redis_client:
@@ -339,30 +339,75 @@ async def get_car_value(make: str, model: str, year: int):
         except Exception as e:
             logger.warning(f"Redis read error: {e}")
 
-    # 2. Try cars.bg
-    result = await scrape_cars_bg(make, model, year)
+    # 2. Scrape BOTH sites in parallel for better confidence
+    cars_bg_task = scrape_cars_bg(make, model, year)
+    mobile_bg_task = scrape_mobile_bg(make, model, year)
 
-    if not result.get("error") and result.get("sample_size", 0) > 0:
-        cache_result(cache_key, result, PRICE_CACHE_TTL)
-        return result
+    results = await asyncio.gather(cars_bg_task, mobile_bg_task, return_exceptions=True)
+    cars_bg_result = results[0] if not isinstance(results[0], Exception) else {"error": str(results[0])}
+    mobile_bg_result = results[1] if not isinstance(results[1], Exception) else {"error": str(results[1])}
 
-    # 3. Try mobile.bg as backup
-    result = await scrape_mobile_bg(make, model, year)
+    # 3. Merge prices from both sources
+    all_prices = []
+    sources_used = []
 
-    if not result.get("error") and result.get("sample_size", 0) > 0:
-        cache_result(cache_key, result, PRICE_CACHE_TTL)
-        return result
+    if not cars_bg_result.get("error") and cars_bg_result.get("sample_size", 0) > 0:
+        # Extract individual prices from cars.bg
+        min_p = cars_bg_result.get("min_price_bgn", 0)
+        max_p = cars_bg_result.get("max_price_bgn", 0)
+        avg_p = cars_bg_result.get("average_price_bgn", 0)
+        sample = cars_bg_result.get("sample_size", 0)
+        # Approximate the price distribution
+        if sample > 0 and avg_p > 0:
+            all_prices.extend([avg_p] * sample)  # Weight by sample size
+            sources_used.append(f"cars.bg({sample})")
 
-    # 4. Return vehicle info only (no price available)
-    return {
+    if not mobile_bg_result.get("error") and mobile_bg_result.get("sample_size", 0) > 0:
+        avg_p = mobile_bg_result.get("average_price_bgn", 0)
+        sample = mobile_bg_result.get("sample_size", 0)
+        if sample > 0 and avg_p > 0:
+            all_prices.extend([avg_p] * sample)
+            sources_used.append(f"mobile.bg({sample})")
+
+    if not all_prices:
+        # No data from either source
+        return {
+            "make": make,
+            "model": model,
+            "year": year,
+            "average_price_bgn": None,
+            "source": "none",
+            "currency": "BGN",
+            "note": "No market data available - manual valuation required"
+        }
+
+    # Calculate combined statistics
+    total_samples = len(all_prices)
+    avg_price = round(sum(all_prices) / total_samples, 2)
+
+    # Get min/max from both sources
+    all_mins = [r.get("min_price_bgn") for r in [cars_bg_result, mobile_bg_result] if r.get("min_price_bgn")]
+    all_maxs = [r.get("max_price_bgn") for r in [cars_bg_result, mobile_bg_result] if r.get("max_price_bgn")]
+
+    result = {
         "make": make,
         "model": model,
         "year": year,
-        "average_price_bgn": None,
-        "source": "none",
+        "average_price_bgn": avg_price,
+        "min_price_bgn": min(all_mins) if all_mins else None,
+        "max_price_bgn": max(all_maxs) if all_maxs else None,
+        "sample_size": total_samples,
+        "source": " + ".join(sources_used),
         "currency": "BGN",
-        "note": "No market data available - manual valuation required"
+        "confidence": min(1.0, total_samples / 10),
+        "sources_detail": {
+            "cars_bg": cars_bg_result if not cars_bg_result.get("error") else None,
+            "mobile_bg": mobile_bg_result if not mobile_bg_result.get("error") else None
+        }
     }
+
+    cache_result(cache_key, result, PRICE_CACHE_TTL)
+    return result
 
 
 @app.get("/value-by-vin/{vin}")

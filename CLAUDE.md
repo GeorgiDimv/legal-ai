@@ -193,15 +193,16 @@ V1y = (m1*V1'*sin(β1) + m2*V2'*sin(β2)) / m1*sin(α1)
 V1 = sqrt(V1x² + V1y²)
 ```
 
-## Car Value Service (v3.3.0)
+## Car Value Service (v3.4.0)
 
 On-demand price scraper with VIN decoding and parts pricing (no database required):
 
 ### Data Flow
 1. **Check Redis cache** (24h TTL for prices/parts, permanent for VIN)
-2. **Live scrape cars.bg** (primary source for vehicle values)
-3. **Live scrape mobile.bg** (backup source)
-4. **Return vehicle info only** if scraping fails (no static fallback)
+2. **Parallel scrape** both cars.bg AND mobile.bg simultaneously
+3. **Merge prices** weighted by sample size for higher confidence
+4. **Return combined result** with source breakdown (e.g., "cars.bg(15) + mobile.bg(8)")
+5. **Return vehicle info only** if both sources fail (no static fallback)
 
 ### Endpoints
 
@@ -240,6 +241,138 @@ The RAG service enables expert-level ATE report generation by providing relevant
 - **Naredba 24**: Bulgarian regulation governing ATE methodology
 - **Uchebnik ATE II**: Official textbook for certified automotive technical experts
 
+### How RAG Works
+
+#### Architecture Overview
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         INGESTION (One-Time)                            │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  PDF File ──► PyMuPDF ──► Text + Pages ──► Chunker ──► DocumentChunks  │
+│                                               │                         │
+│                                               ▼                         │
+│                                          BGE-M3 Model                   │
+│                                               │                         │
+│                                               ▼                         │
+│                                      1024-dim Vectors                   │
+│                                               │                         │
+│                                               ▼                         │
+│                                     Qdrant (ate_knowledge)              │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         RETRIEVAL (Per Query)                           │
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Query ──► BGE-M3 ──► Query Vector ──► Qdrant Search ──► Top K Chunks  │
+│  "методика за                              │                            │
+│   скоростта"                               │ cosine similarity          │
+│                                            ▼                            │
+│                                   Chunks + Scores + Metadata            │
+│                                            │                            │
+│                                            ▼                            │
+│                                   Formatted Context for LLM             │
+│                                                                         │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+#### Step 1: PDF Ingestion (`ingest.py`)
+```python
+# What happens when you call /ingest-local:
+
+1. PDF → Text Extraction (PyMuPDF)
+   - Extracts text page-by-page
+   - Preserves page numbers for citations
+
+2. Document Type Detection
+   - Filename patterns: "naredba" → naredba_24, "uchebnik" → uchebnik_ate
+   - Content patterns: "чл." (articles) → regulation
+
+3. Smart Chunking
+   - Target: 512 words per chunk
+   - Overlap: 50 words (preserves context at boundaries)
+   - Breaks at sentence boundaries (. ! ?)
+   - Skips chunks < 50 chars
+
+4. Metadata Extraction per Chunk:
+   - document: "naredba_24" or "uchebnik_ate"
+   - section: "Глава II" or "Раздел 3"
+   - article: "Чл. 5" (if present)
+   - page: source page number
+   - chunk_type: "regulation", "formula", "methodology", "definition", "example"
+```
+
+#### Step 2: Embedding Generation (`embeddings.py`)
+```python
+# BGE-M3 Model (BAAI/bge-m3)
+- Multilingual: Bulgarian, English, Russian, etc.
+- Output: 1024-dimensional vectors
+- Normalized embeddings (unit length for cosine similarity)
+
+# Query vs Document Embedding
+- Documents: Embedded as-is
+- Queries: Prefixed with "Represent this sentence for searching relevant passages: "
+  (Improves retrieval accuracy)
+```
+
+#### Step 3: Vector Storage (`retrieval.py`)
+```python
+# Qdrant Collection: "ate_knowledge"
+- Vector size: 1024
+- Distance metric: Cosine similarity
+- Indexed fields: document, chunk_type, article (for filtering)
+
+# Each stored point contains:
+{
+    "id": 123,
+    "vector": [0.023, -0.045, ...],  # 1024 floats
+    "payload": {
+        "text": "Съгласно методиката за определяне...",
+        "document": "naredba_24",
+        "section": "Глава III",
+        "article": "Чл. 12",
+        "page": 45,
+        "chunk_type": "methodology"
+    }
+}
+```
+
+#### Step 4: Search & Retrieval
+```python
+# When /context is called:
+1. Query text → BGE-M3 → query_vector
+2. Qdrant.query_points(query_vector, limit=8, score_threshold=0.5)
+3. Returns chunks sorted by cosine similarity
+
+# Example search result:
+{
+    "text": "При определяне скоростта на движение се използва формулата V = √(2·μ·g·S)...",
+    "document": "uchebnik_ate",
+    "section": "Глава V",
+    "page": 127,
+    "chunk_type": "formula",
+    "score": 0.87  # 87% similar to query
+}
+```
+
+### Why Chunks Are Real Data (Not Magic)
+
+The 570 vectors in your collection are **actual text chunks** from the PDFs:
+
+```bash
+# Verify chunks are real text:
+curl -X POST http://localhost:8005/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "скорост", "limit": 1}'
+
+# Returns actual text from Naredba 24 or Uchebnik ATE II
+# with page numbers you can verify in the original PDF
+```
+
+Each chunk is stored with its **source page number**, so you can cross-reference with the original document.
+
 ### Setup
 
 ```bash
@@ -255,6 +388,27 @@ curl -X POST "http://localhost:8005/ingest-local?filename=Uchebnik%20full%20ATE%
 
 # 4. Check indexing status
 curl http://localhost:8005/collections
+# Expected: {"points_count": 570, "vectors_count": 570, "status": "green"}
+```
+
+### Testing RAG
+
+```bash
+# 1. Verify embeddings worked
+curl http://localhost:8005/collections
+# Should show points_count > 0
+
+# 2. Test search retrieval
+curl -X POST http://localhost:8005/search \
+  -H "Content-Type: application/json" \
+  -d '{"query": "методика за определяне на скоростта при ПТП", "limit": 3}'
+# Should return relevant chunks with scores > 0.5
+
+# 3. Test context formatting (what gateway uses)
+curl -X POST http://localhost:8005/context \
+  -H "Content-Type: application/json" \
+  -d '{"query": "автотехническа експертиза изисквания", "limit": 5}'
+# Returns formatted context with source citations
 ```
 
 ### RAG Endpoints
@@ -299,13 +453,59 @@ The report follows Bulgarian ATE standards with sections:
 6. Изводи (Conclusions)
 7. Отговори на въпросите (Answers)
 
+#### Internal Process Flow (2 LLM Calls)
+
+The `/generate-ate-report` endpoint uses 2 sequential LLM calls:
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│  Raw Text   │────▶│  LLM Call 1 │────▶│ RAG Search  │────▶│  LLM Call 2 │
+│  (input)    │     │  (extract)  │     │  (context)  │     │  (generate) │
+└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+                          │                   │                    │
+                          ▼                   ▼                    ▼
+                    Structured JSON     8 Expert Chunks      ATE Report
+                    (vehicles, etc.)    (methodology)        (Bulgarian)
+```
+
+**Step 1: Data Extraction** (~3 min @ 5 tokens/s)
+- Input: Raw claim text
+- Output: Structured JSON with vehicles, parties, location, damages
+- Purpose: Understand what happened in the claim
+
+**Step 2: RAG Context Retrieval** (~1 sec)
+- Query: Summary of extracted data
+- Output: 5-8 relevant chunks from Naredba 24 / Uchebnik ATE
+- Purpose: Get expert methodology and legal requirements
+
+**Step 3: Report Generation** (~5-7 min @ 5 tokens/s)
+- Input: Extracted JSON + RAG context + expert questions
+- Output: Professional Bulgarian ATE report
+- Purpose: Generate report following expert standards
+
+**Performance Notes:**
+- Total time: ~8-10 minutes per report
+- Concurrency: Limited to 1 report at a time (GPU constraint)
+- Queue: Max 2 waiting requests (503 if exceeded)
+
+### Key Files
+
+| File | Purpose |
+|------|---------|
+| `services/rag/main.py` | FastAPI service with /search, /context, /ingest endpoints |
+| `services/rag/ingest.py` | PDF text extraction, chunking, metadata detection |
+| `services/rag/embeddings.py` | BGE-M3 model loading and embedding generation |
+| `services/rag/retrieval.py` | Qdrant client, vector storage, similarity search |
+
 ### Technical Details
 
-- **Embedding Model**: BGE-M3 (multilingual, runs on CPU)
-- **Vector Database**: Qdrant (cosine similarity)
-- **Chunk Size**: 512 tokens with 50 token overlap
-- **Retrieval**: Top 5-8 most relevant chunks per query
+- **Embedding Model**: BGE-M3 (`BAAI/bge-m3`) - multilingual, 1024 dimensions
+- **Vector Database**: Qdrant (cosine similarity, payload indexing)
+- **Chunk Size**: 512 words with 50 word overlap
+- **Chunk Types**: regulation, methodology, formula, definition, example
+- **Retrieval**: Top 5-8 most relevant chunks per query (score > 0.5)
 - **Context Budget**: ~3000 tokens for RAG context in 16k window
+- **Device**: CPU by default (set USE_GPU=true for GPU acceleration)
 
 ## Notes
 
