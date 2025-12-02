@@ -399,8 +399,8 @@ async def geocode_location(location: dict) -> dict:
             params={
                 "q": query,
                 "format": "json",
-                "limit": 1,
-                "countrycodes": "bg"
+                "limit": 1
+                # Note: removed countrycodes=bg as it was too restrictive for Bulgarian addresses
             }
         )
 
