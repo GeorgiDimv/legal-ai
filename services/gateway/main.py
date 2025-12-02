@@ -1164,6 +1164,19 @@ async def generate_ate_report(request: ATEReportRequest):
                 "Какви са техническите причини за произшествието?"
             ]
 
+            # Prepare trimmed case data for report (exclude raw_ocr_text to save tokens)
+            report_data = {k: v for k, v in case_data.items() if k != "raw_ocr_text"}
+
+            # Also trim verbose parts from vehicles (search_results in parts_estimate)
+            if "vehicles" in report_data:
+                for vehicle in report_data["vehicles"]:
+                    if vehicle.get("parts_estimate") and "parts" in vehicle["parts_estimate"]:
+                        for part in vehicle["parts_estimate"]["parts"]:
+                            part.pop("search_results", None)  # Remove verbose search results
+
+            report_data_json = json.dumps(report_data, indent=2, ensure_ascii=False, default=str)
+            logger.info(f"Report data size: {len(report_data_json)} chars")
+
             # Generate ATE report using LLM with RAG context
             report_prompt = f"""/no_think
 Генерирайте професионална Автотехническа Експертиза (АТЕ) на български език.
@@ -1173,7 +1186,7 @@ async def generate_ate_report(request: ATEReportRequest):
 {ate_knowledge}
 
 ДАННИ ЗА СЛУЧАЯ:
-{json.dumps(case_data, indent=2, ensure_ascii=False, default=str)}
+{report_data_json}
 
 ВЪПРОСИ ЗА ОТГОВОР:
 {chr(10).join(f'{i+1}. {q}' for i, q in enumerate(expert_questions))}
