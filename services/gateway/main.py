@@ -1355,9 +1355,9 @@ async def generate_ate_report(request: ATEReportRequest):
 {{"report_text": "[ТУК НАПИШЕТЕ ЦЕЛИЯ ДОКЛАД]", "sections": {{}}}}
 """
 
-            # Estimate input tokens (Cyrillic uses ~2 chars per token, be conservative)
+            # Estimate input tokens (Cyrillic tokenizes at ~4 chars per token with Qwen)
             prompt_chars = len(report_prompt) + 150  # +150 for system prompt
-            estimated_input_tokens = prompt_chars // 2  # Conservative: 2 chars per token for Cyrillic
+            estimated_input_tokens = prompt_chars // 4  # ~4 chars per token for Cyrillic (verified via KV cache)
 
             # Calculate max_tokens to stay within 16k context
             max_context = 16384
