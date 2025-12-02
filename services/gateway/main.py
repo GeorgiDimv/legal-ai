@@ -92,9 +92,11 @@ async def startup():
     global llm_client, db_pool, redis_client
 
     # Initialize OpenAI client pointing to vLLM
+    # Set 45 min timeout for long report generation (~5000 tokens at 3 tokens/s = 28 min)
     llm_client = AsyncOpenAI(
         base_url=f"{LLM_URL}/v1",
-        api_key="not-needed"  # vLLM doesn't require API key
+        api_key="not-needed",  # vLLM doesn't require API key
+        timeout=2700.0  # 45 minutes in seconds
     )
     logger.info(f"LLM client configured for {LLM_URL}")
 
