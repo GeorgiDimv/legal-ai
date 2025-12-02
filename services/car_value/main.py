@@ -49,6 +49,10 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 # NHTSA API endpoint
 NHTSA_API = "https://vpic.nhtsa.dot.gov/api/vehicles/DecodeVinValues"
 
+# RAG service for Naredba 24 labor norms
+RAG_URL = os.environ.get("RAG_URL", "http://rag:8005")
+LABOR_NORM_CACHE_TTL = 604800  # 7 days for labor norms (they rarely change)
+
 # WMI (World Manufacturer Identifier) mapping for local fallback
 WMI_MAP = {
     "WBA": ("BMW", "Germany"), "WBS": ("BMW M", "Germany"), "WBY": ("BMW i", "Germany"),
@@ -786,6 +790,45 @@ def translate_part_name(part_name: str) -> str:
 
 from pydantic import BaseModel
 
+# Work type categories with default hourly rates (BGN)
+# These can be overridden via API parameter
+WORK_TYPE_RATES = {
+    "тенекеджийски": 50,    # Bodywork (изчукване, заваряване)
+    "бояджийски": 60,       # Painting
+    "механичен": 45,        # Mechanical repairs
+    "електрически": 55,     # Electrical work
+    "стъкла": 60,           # Glass replacement
+    "default": 50,          # Default rate
+}
+
+# Part to work type mapping
+PART_WORK_TYPES = {
+    # Bodywork parts (тенекеджийски)
+    "броня": "тенекеджийски", "bumper": "тенекеджийски",
+    "калник": "тенекеджийски", "fender": "тенекеджийски",
+    "врата": "тенекеджийски", "door": "тенекеджийски",
+    "капак": "тенекеджийски", "hood": "тенекеджийски",
+    "праг": "тенекеджийски", "sill": "тенекеджийски",
+    "таван": "тенекеджийски", "roof": "тенекеджийски",
+    "колона": "тенекеджийски", "pillar": "тенекеджийски",
+    "под": "тенекеджийски", "floor": "тенекеджийски",
+    "панел": "тенекеджийски", "panel": "тенекеджийски",
+
+    # Glass parts (стъкла)
+    "стъкло": "стъкла", "glass": "стъкла",
+    "windshield": "стъкла", "челно": "стъкла",
+
+    # Electrical parts (електрически)
+    "фар": "електрически", "headlight": "електрически",
+    "стоп": "електрически", "taillight": "електрически",
+    "огледало": "електрически", "mirror": "електрически",  # Often has electronics
+
+    # Mechanical parts (механичен)
+    "радиатор": "механичен", "radiator": "механичен",
+    "амортисьор": "механичен", "shock": "механичен",
+}
+
+
 class PartsSearchRequest(BaseModel):
     """Request body for parts search."""
     make: str
@@ -793,6 +836,127 @@ class PartsSearchRequest(BaseModel):
     year: int
     parts: List[str]
     include_labor: bool = True
+    hourly_rate_bgn: Optional[float] = None  # Override default hourly rate
+    work_type_rates: Optional[Dict[str, float]] = None  # Override rates by work type
+
+
+async def get_labor_hours_from_rag(part_name: str) -> Optional[float]:
+    """
+    Query RAG service to get official labor hours from Naredba 24.
+
+    Args:
+        part_name: Part name in Bulgarian or English
+
+    Returns:
+        Labor hours from Naredba 24, or None if not found
+    """
+    # Check cache first
+    cache_key = f"labor_norm:{part_name.lower()}"
+    if redis_client:
+        try:
+            cached = redis_client.get(cache_key)
+            if cached:
+                logger.info(f"Labor norm cache hit: {part_name}")
+                return float(cached)
+        except Exception as e:
+            logger.warning(f"Redis read error: {e}")
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            # Search for labor norm in Naredba 24
+            # Use specific context that matches the document structure
+            query = f"{part_name} подмяна детайли технологични часове"
+            response = await client.post(
+                f"{RAG_URL}/search",
+                json={"query": query, "limit": 5}
+            )
+
+            if response.status_code == 200:
+                data = response.json()
+                results = data.get("results", [])
+
+                if results:
+                    # Parse the text to extract hours
+                    # Naredba 24 format: "20. Праг 7,5 8,5 9,5 10" (number. part hours1 hours2 hours3 hours4)
+                    import re
+
+                    for result in results:
+                        text = result.get("text", "")
+                        part_lower = part_name.lower()
+
+                        # Try multiple patterns to find the part and its hours
+                        # Pattern 1: "20. Праг 7,5 8,5 9,5 10" - numbered list format
+                        # Pattern 2: "Праг 7,5 8,5" - simple format
+                        patterns = [
+                            # Numbered format: "20. Праг 7,5 8,5 9,5 10"
+                            rf'\d+\.\s*{re.escape(part_lower)}\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
+                            # Simple format: "Праг 7,5 8,5"
+                            rf'{re.escape(part_lower)}\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
+                        ]
+
+                        for pattern in patterns:
+                            match = re.search(pattern, text.lower(), re.IGNORECASE)
+                            if match:
+                                numbers_str = match.group(1)
+                                # Extract all numbers from the matched string
+                                numbers = re.findall(r'(\d+[,.]?\d*)', numbers_str)
+                                if numbers:
+                                    # Take average of vehicle classes (usually 4 values)
+                                    valid_hours = []
+                                    for num_str in numbers[:4]:  # Max 4 vehicle classes
+                                        try:
+                                            h = float(num_str.replace(",", "."))
+                                            if 0.1 <= h <= 50:  # Sanity check
+                                                valid_hours.append(h)
+                                        except:
+                                            continue
+
+                                    if valid_hours:
+                                        # Use average across vehicle classes
+                                        avg_hours = round(sum(valid_hours) / len(valid_hours), 1)
+                                        # Cache the result
+                                        if redis_client:
+                                            try:
+                                                redis_client.setex(cache_key, LABOR_NORM_CACHE_TTL, str(avg_hours))
+                                            except Exception as e:
+                                                logger.warning(f"Redis write error: {e}")
+                                        logger.info(f"Labor norm from RAG: {part_name} = {avg_hours}h (from {valid_hours})")
+                                        return avg_hours
+
+    except Exception as e:
+        logger.warning(f"RAG labor norm lookup failed for {part_name}: {e}")
+
+    return None
+
+
+def get_work_type_for_part(part_name: str) -> str:
+    """Determine work type category for a part."""
+    part_lower = part_name.lower()
+    for keyword, work_type in PART_WORK_TYPES.items():
+        if keyword in part_lower:
+            return work_type
+    return "default"
+
+
+def get_hourly_rate(part_name: str, hourly_rate_override: Optional[float],
+                    work_type_rates_override: Optional[Dict[str, float]]) -> float:
+    """
+    Get hourly rate for a part based on work type.
+
+    Priority:
+    1. Global hourly_rate_override (if provided)
+    2. Work type specific rate from override dict
+    3. Default work type rate
+    """
+    if hourly_rate_override:
+        return hourly_rate_override
+
+    work_type = get_work_type_for_part(part_name)
+
+    if work_type_rates_override and work_type in work_type_rates_override:
+        return work_type_rates_override[work_type]
+
+    return WORK_TYPE_RATES.get(work_type, WORK_TYPE_RATES["default"])
 
 
 @app.post("/parts/search")
@@ -805,45 +969,27 @@ async def search_parts_prices(request: PartsSearchRequest):
     - alo.bg (used parts marketplace)
     - mobile.bg parts section
 
+    Labor hours are retrieved from Naredba 24 via RAG service.
+
     Args:
         request: PartsSearchRequest with make, model, year, parts list
+        - hourly_rate_bgn: Override default hourly rate for all parts
+        - work_type_rates: Override rates by work type (тенекеджийски, бояджийски, etc.)
 
     Returns:
-        Parts breakdown with prices and sources
+        Parts breakdown with prices, labor hours (from Naredba 24), and sources
     """
     make = request.make
     model = request.model
     year = request.year
     parts = request.parts
     include_labor = request.include_labor
+    hourly_rate_override = request.hourly_rate_bgn
+    work_type_rates_override = request.work_type_rates
 
     results = []
     total_parts_cost = 0
     total_labor_cost = 0
-
-    # Labor rates (BGN per hour) - varies by part complexity
-    LABOR_RATES = {
-        "bumper": {"hours": 2.5, "rate": 50},
-        "броня": {"hours": 2.5, "rate": 50},
-        "fender": {"hours": 2.0, "rate": 50},
-        "калник": {"hours": 2.0, "rate": 50},
-        "door": {"hours": 2.5, "rate": 50},
-        "врата": {"hours": 2.5, "rate": 50},
-        "hood": {"hours": 1.5, "rate": 50},
-        "капак": {"hours": 1.5, "rate": 50},
-        "headlight": {"hours": 1.0, "rate": 50},
-        "фар": {"hours": 1.0, "rate": 50},
-        "taillight": {"hours": 0.5, "rate": 50},
-        "стоп": {"hours": 0.5, "rate": 50},
-        "mirror": {"hours": 0.5, "rate": 50},
-        "огледало": {"hours": 0.5, "rate": 50},
-        "windshield": {"hours": 2.0, "rate": 60},
-        "стъкло": {"hours": 2.0, "rate": 60},
-        "radiator": {"hours": 2.5, "rate": 50},
-        "радиатор": {"hours": 2.5, "rate": 50},
-        "shock": {"hours": 1.5, "rate": 50},
-        "амортисьор": {"hours": 1.5, "rate": 50},
-    }
 
     for part_name in parts:
         # Check cache first
@@ -871,15 +1017,33 @@ async def search_parts_prices(request: PartsSearchRequest):
         # Search multiple sources in parallel
         search_results = await search_part_prices(make, model, year, part_name, part_bg)
 
-        # Calculate labor cost
+        # Calculate labor cost using RAG (Naredba 24) + work type rates
         labor_cost = 0
+        labor_hours = None
+        labor_source = None
+        hourly_rate = None
+        work_type = None
+
         if include_labor:
-            for keyword, labor_info in LABOR_RATES.items():
-                if keyword in part_name.lower() or keyword in part_bg.lower():
-                    labor_cost = labor_info["hours"] * labor_info["rate"]
-                    break
-            if labor_cost == 0:
-                labor_cost = 1.5 * 50  # Default: 1.5 hours at 50 BGN
+            # Get labor hours from Naredba 24 via RAG
+            labor_hours = await get_labor_hours_from_rag(part_bg)
+
+            if labor_hours is None:
+                # Try with English name
+                labor_hours = await get_labor_hours_from_rag(part_name)
+
+            if labor_hours is None:
+                # Default fallback
+                labor_hours = 1.5
+                labor_source = "default"
+            else:
+                labor_source = "naredba_24"
+
+            # Get hourly rate based on work type
+            work_type = get_work_type_for_part(part_bg or part_name)
+            hourly_rate = get_hourly_rate(part_name, hourly_rate_override, work_type_rates_override)
+
+            labor_cost = round(labor_hours * hourly_rate, 2)
 
         part_result = {
             "part_name": part_name,
@@ -888,6 +1052,10 @@ async def search_parts_prices(request: PartsSearchRequest):
             "best_price_bgn": None,
             "best_source": None,
             "price_range": None,
+            "labor_hours": labor_hours if include_labor else None,
+            "labor_hours_source": labor_source if include_labor else None,
+            "hourly_rate_bgn": hourly_rate if include_labor else None,
+            "work_type": work_type if include_labor else None,
             "labor_cost_bgn": labor_cost if include_labor else None,
         }
 
