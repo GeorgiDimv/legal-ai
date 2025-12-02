@@ -301,7 +301,9 @@ def clean_bulgarian_address(address: str) -> str:
 
 
 async def geocode_location(location: dict) -> dict:
-    """Geocode an address using Nominatim."""
+    """Geocode an address using Nominatim with fallback for house numbers."""
+    import re as re_module
+
     query_parts = []
     if location.get("address"):
         cleaned_address = clean_bulgarian_address(location["address"])
@@ -319,6 +321,7 @@ async def geocode_location(location: dict) -> dict:
     logger.info(f"Geocoding query: {query}")
 
     async with httpx.AsyncClient(timeout=10) as client:
+        # Try with full address first
         response = await client.get(
             f"{NOMINATIM_URL}/search",
             params={
@@ -336,6 +339,33 @@ async def geocode_location(location: dict) -> dict:
                     "lat": float(results[0]["lat"]),
                     "lon": float(results[0]["lon"])
                 }
+
+        # Fallback: try without house numbers (Nominatim often can't find specific addresses)
+        # Remove numbers from address part
+        if query_parts:
+            address_no_numbers = re_module.sub(r'\s*\d+\s*', ' ', query_parts[0]).strip()
+            if address_no_numbers != query_parts[0]:
+                fallback_parts = [address_no_numbers] + query_parts[1:]
+                fallback_query = ", ".join(fallback_parts) + ", Bulgaria"
+                logger.info(f"Geocoding fallback query: {fallback_query}")
+
+                response = await client.get(
+                    f"{NOMINATIM_URL}/search",
+                    params={
+                        "q": fallback_query,
+                        "format": "json",
+                        "limit": 1,
+                        "countrycodes": "bg"
+                    }
+                )
+
+                if response.status_code == 200:
+                    results = response.json()
+                    if results:
+                        return {
+                            "lat": float(results[0]["lat"]),
+                            "lon": float(results[0]["lon"])
+                        }
 
     return {}
 
