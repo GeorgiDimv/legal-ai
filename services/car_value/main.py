@@ -885,6 +885,8 @@ async def get_labor_hours_from_rag(part_name: str) -> Optional[float]:
                 f"{base_name} на купе часове",  # "таван на купе"
                 f"подмяна нови детайли леки автомобили {base_name}",  # Full table query
                 f"раздел подмяна {base_name}",
+                # Catch-all: retrieve full parts table (this works for all parts)
+                "раздел подмяна нови детайли леки автомобили технологични часове",
             ]
 
             for query in queries:
