@@ -1072,18 +1072,18 @@ async def search_parts_prices(request: PartsSearchRequest):
                 # Try with English name
                 labor_hours = await get_labor_hours_from_rag(part_name)
 
-            if labor_hours is None:
-                # Default fallback
-                labor_hours = 1.5
-                labor_source = "default"
-            else:
+            if labor_hours is not None:
                 labor_source = "naredba_24"
+            else:
+                # No default - return null if not found in Naredba 24
+                labor_source = None
+                logger.warning(f"Labor hours not found in Naredba 24 for: {part_name} ({part_bg})")
 
-            # Get hourly rate based on work type
-            work_type = get_work_type_for_part(part_bg or part_name)
-            hourly_rate = get_hourly_rate(part_name, hourly_rate_override, work_type_rates_override)
-
-            labor_cost = round(labor_hours * hourly_rate, 2)
+            # Get hourly rate based on work type (only if hours found)
+            if labor_hours is not None:
+                work_type = get_work_type_for_part(part_bg or part_name)
+                hourly_rate = get_hourly_rate(part_name, hourly_rate_override, work_type_rates_override)
+                labor_cost = round(labor_hours * hourly_rate, 2)
 
         part_result = {
             "part_name": part_name,
