@@ -677,13 +677,9 @@ async def get_dual_ate_context(query: str, damaged_parts: list[str] = None) -> t
     uchebnik_query = f"методика скорост формула удар ПТП {query[:500]}"
     uchebnik_context = await get_ate_context(uchebnik_query, limit=3, document_filter="uchebnik_ate")
 
-    # Query for labor hours/norms from Naredba 24 (if damaged parts provided)
+    # Skip labor_context RAG - we now have structured labor norms in car_value service v4.0.0
+    # This saves ~1500 tokens for report output
     labor_context = None
-    if damaged_parts:
-        # Translate common parts to Bulgarian for better matching
-        parts_bg = " ".join(damaged_parts[:5])  # Limit to 5 parts
-        labor_query = f"норматив ремонт {parts_bg} броня фар врата капак"
-        labor_context = await get_ate_context(labor_query, limit=3, document_filter="naredba_24")
 
     # Combine with clear labels
     combined_parts = []
@@ -1235,18 +1231,48 @@ async def generate_ate_report(request: ATEReportRequest):
                 "Какви са техническите причини за произшествието?"
             ]
 
-            # Prepare trimmed case data for report (exclude raw_ocr_text to save tokens)
-            report_data = {k: v for k, v in case_data.items() if k != "raw_ocr_text"}
+            # Prepare MINIMAL case data for report (only essential fields)
+            # This dramatically reduces tokens to leave room for output
+            report_data = {
+                "claim_number": case_data.get("claim_number"),
+                "accident_date": case_data.get("accident_date"),
+                "accident_time": case_data.get("accident_time"),
+                "accident_location": case_data.get("accident_location"),
+                "accident_description": case_data.get("accident_description"),
+                "fault_determination": case_data.get("fault_determination"),
+            }
 
-            # Also trim verbose parts from vehicles (search_results in parts_estimate)
-            if "vehicles" in report_data:
-                for vehicle in report_data["vehicles"]:
-                    if vehicle.get("parts_estimate") and "parts" in vehicle["parts_estimate"]:
-                        for part in vehicle["parts_estimate"]["parts"]:
-                            part.pop("search_results", None)  # Remove verbose search results
+            # Extract only essential vehicle data
+            if case_data.get("vehicles"):
+                report_data["vehicles"] = []
+                for v in case_data["vehicles"]:
+                    vehicle_summary = {
+                        "make": v.get("make"),
+                        "model": v.get("model"),
+                        "year": v.get("year"),
+                        "registration": v.get("registration"),
+                        "vin": v.get("vin"),
+                        "mass_kg": v.get("mass_kg"),
+                        "damage_description": v.get("damage_description"),
+                        "damaged_parts": v.get("damaged_parts", []),
+                        "current_market_value_bgn": v.get("current_market_value_bgn"),
+                    }
+                    # Add parts summary (not full details)
+                    if v.get("parts_estimate"):
+                        pe = v["parts_estimate"]
+                        vehicle_summary["repair_estimate"] = {
+                            "total_parts_bgn": pe.get("total_parts_cost_bgn"),
+                            "total_labor_bgn": pe.get("total_labor_cost_bgn"),
+                            "total_repair_bgn": pe.get("total_repair_cost_bgn"),
+                        }
+                    report_data["vehicles"].append(vehicle_summary)
+
+            # Include physics summary
+            if case_data.get("physics_analysis"):
+                report_data["physics_analysis"] = case_data["physics_analysis"]
 
             report_data_json = json.dumps(report_data, indent=2, ensure_ascii=False, default=str)
-            logger.info(f"Report data size: {len(report_data_json)} chars")
+            logger.info(f"Report data size: {len(report_data_json)} chars (trimmed from full extraction)")
 
             # Extract physics values for explicit injection (LLM tends to ignore nested JSON)
             # Try both field naming conventions (PhysicsAnalysis vs raw physics service response)
@@ -1361,8 +1387,8 @@ async def generate_ate_report(request: ATEReportRequest):
 
             # Calculate max_tokens to stay within 16k context
             max_context = 16384
-            available_tokens = max_context - estimated_input_tokens - 500  # 500 token safety buffer
-            max_output_tokens = min(2000, max(1000, available_tokens))  # Between 1000-2000
+            available_tokens = max_context - estimated_input_tokens - 300  # 300 token safety buffer
+            max_output_tokens = min(4000, max(2000, available_tokens))  # Between 2000-4000 for full report
 
             logger.info(f"Report generation: ~{estimated_input_tokens} input tokens, {max_output_tokens} max output")
 
