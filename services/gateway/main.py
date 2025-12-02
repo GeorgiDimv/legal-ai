@@ -661,7 +661,7 @@ async def get_ate_context(query: str, limit: int = 5, document_filter: str = Non
     return {"context": "", "sources": [], "count": 0}
 
 
-async def get_dual_ate_context(query: str) -> tuple[str, list[str]]:
+async def get_dual_ate_context(query: str, damaged_parts: list[str] = None) -> tuple[str, list[str]]:
     """
     Retrieve ATE knowledge from BOTH sources with separate queries.
 
@@ -677,6 +677,14 @@ async def get_dual_ate_context(query: str) -> tuple[str, list[str]]:
     uchebnik_query = f"методика скорост формула удар ПТП {query[:500]}"
     uchebnik_context = await get_ate_context(uchebnik_query, limit=3, document_filter="uchebnik_ate")
 
+    # Query for labor hours/norms from Naredba 24 (if damaged parts provided)
+    labor_context = None
+    if damaged_parts:
+        # Translate common parts to Bulgarian for better matching
+        parts_bg = " ".join(damaged_parts[:5])  # Limit to 5 parts
+        labor_query = f"норматив ремонт {parts_bg} броня фар врата капак"
+        labor_context = await get_ate_context(labor_query, limit=3, document_filter="naredba_24")
+
     # Combine with clear labels
     combined_parts = []
     all_sources = []
@@ -684,7 +692,12 @@ async def get_dual_ate_context(query: str) -> tuple[str, list[str]]:
     if naredba_context.get("context"):
         combined_parts.append(f"═══ НАРЕДБА 24 (Правни изисквания) ═══\n{naredba_context['context']}")
         all_sources.extend(naredba_context.get("sources", []))
-        logger.info(f"Retrieved {naredba_context.get('count', 0)} Naredba 24 chunks")
+        logger.info(f"Retrieved {naredba_context.get('count', 0)} Naredba 24 legal chunks")
+
+    if labor_context and labor_context.get("context"):
+        combined_parts.append(f"═══ НАРЕДБА 24 (Нормативи за ремонт - часове) ═══\n{labor_context['context']}")
+        all_sources.extend(labor_context.get("sources", []))
+        logger.info(f"Retrieved {labor_context.get('count', 0)} Naredba 24 labor chunks")
 
     if uchebnik_context.get("context"):
         combined_parts.append(f"═══ УЧЕБНИК АТЕ (Техническа методология) ═══\n{uchebnik_context['context']}")
@@ -1146,6 +1159,8 @@ class ATEReportRequest(BaseModel):
     expert_questions: Optional[list[str]] = None  # Questions for the expert to answer
     include_physics: bool = True
     include_methodology: bool = True
+    # Labor cost calculation
+    hourly_rate_bgn: float = 60.0  # Default: official dealer rate (60 лв/час)
 
 
 class ATEReportResponse(BaseModel):
@@ -1201,10 +1216,16 @@ async def generate_ate_report(request: ATEReportRequest):
             case_data = await enrich_with_car_values(case_data)
             case_data = await enrich_with_physics(case_data)
 
+            # Extract damaged parts from all vehicles for labor norms query
+            damaged_parts = []
+            for vehicle in case_data.get("vehicles", []):
+                damaged_parts.extend(vehicle.get("damaged_parts", []))
+            logger.info(f"Damaged parts for labor query: {damaged_parts}")
+
             # Get relevant ATE knowledge from RAG using dual-query approach
             # This ensures we get both legal requirements (Naredba 24) and technical methodology (Uchebnik)
             logger.info("Retrieving dual-source RAG context (Naredba 24 + Uchebnik)...")
-            ate_knowledge, sources = await get_dual_ate_context(raw_text[:1000])
+            ate_knowledge, sources = await get_dual_ate_context(raw_text[:1000], damaged_parts=damaged_parts)
 
             # Build the expert questions section
             expert_questions = request.expert_questions or [
@@ -1310,6 +1331,13 @@ async def generate_ate_report(request: ATEReportRequest):
    - Използвайте "лента" (lane) НЕ "лоста"
    - Използвайте "сменях лента" НЕ "сменях лоста"
    - Правилно: "промяна на лента", "дясна лента", "лява лента"
+
+6. КАЛКУЛАЦИЯ НА ТРУД (ако има норматив в референциите):
+   - Часова ставка: {request.hourly_rate_bgn} лв/час (официален сервиз)
+   - Използвайте нормативите от Наредба 24 (часове по клас МПС)
+   - Класове: A (<4m), B (4-4.6m), C (>4.6m), Джип
+   - Формула: Труд = Норматив (часове) × {request.hourly_rate_bgn} лв/час
+   - Пример: Задна броня клас B = 1.8 часа × {request.hourly_rate_bgn} = {request.hourly_rate_bgn * 1.8:.0f} лв
 
 ЗАДЪЛЖИТЕЛНА СТРУКТУРА НА ДОКЛАДА:
 
