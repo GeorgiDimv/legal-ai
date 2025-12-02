@@ -34,7 +34,7 @@ Legal AI is a document processing pipeline for Bulgarian automotive insurance cl
 **Key Services:**
 - **Gateway** (`services/gateway/`): FastAPI orchestrator with `/process`, `/process-text`, and `/generate-ate-report` endpoints
 - **OCR** (`services/ocr/`): PaddleOCR with Cyrillic language support for Bulgarian documents
-- **LLM**: vLLM serving Qwen3-32B-AWQ across 6 GPUs with tensor parallelism (16k context)
+- **LLM**: vLLM serving Qwen3-32B-AWQ across 4 GPUs with tensor parallelism (16k context)
 - **Physics** (`services/physics/`): Crash reconstruction using Momentum 360 and Impact Theory formulas
 - **Car Value** (`services/car_value/`): On-demand price scraper with VIN decoding (cars.bg + mobile.bg + NHTSA API)
 - **Nominatim**: Geocoding service with Bulgaria OSM data (returns lat/lon coordinates)
@@ -512,7 +512,7 @@ The `/generate-ate-report` endpoint uses 2 sequential LLM calls:
                     (vehicles, etc.)    (methodology)        (Bulgarian)
 ```
 
-**Step 1: Data Extraction** (~3 min @ 5 tokens/s)
+**Step 1: Data Extraction** (~2 min @ 4.5 tokens/s)
 - Input: Raw claim text
 - Output: Structured JSON with vehicles, parties, location, damages
 - Purpose: Understand what happened in the claim
@@ -522,13 +522,13 @@ The `/generate-ate-report` endpoint uses 2 sequential LLM calls:
 - Output: 5-8 relevant chunks from Naredba 24 / Uchebnik ATE
 - Purpose: Get expert methodology and legal requirements
 
-**Step 3: Report Generation** (~5-7 min @ 5 tokens/s)
+**Step 3: Report Generation** (~4-5 min @ 4.5 tokens/s)
 - Input: Extracted JSON + RAG context + expert questions
 - Output: Professional Bulgarian ATE report
 - Purpose: Generate report following expert standards
 
 **Performance Notes:**
-- Total time: ~8-10 minutes per report
+- Total time: ~5-6 minutes per report
 - Concurrency: Limited to 1 report at a time (GPU constraint)
 - Queue: Max 2 waiting requests (503 if exceeded)
 
@@ -554,8 +554,9 @@ The `/generate-ate-report` endpoint uses 2 sequential LLM calls:
 ## Notes
 
 - LLM requires 4 GPUs with tensor parallelism; first startup downloads ~20GB model
-- LLM context window is 16k tokens; generation speed ~2.4 tokens/s
-- ATE reports use optimized token budget: ~7k input, 4k max output (trimmed from full extraction)
+- LLM context window is 16k tokens; generation speed ~4.5 tokens/s
+- vLLM runs with `--enforce-eager --disable-custom-all-reduce` flags for GPU stability (RTX 3060 Ti)
+- ATE reports use optimized token budget: ~7k input, 4k max output (no duplicate sections field)
 - RAG embedding model runs on CPU to preserve GPU for LLM
 - Nominatim takes 30-60 minutes on first run to import Bulgaria OSM data
 - All monetary values are in Bulgarian Lev (BGN)

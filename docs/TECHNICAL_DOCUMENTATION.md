@@ -142,12 +142,14 @@ Legal AI is a document processing pipeline designed specifically for Bulgarian a
 - **Port**: 8004
 - **Methods**: Momentum 360, Impact Theory, Dangerous Zone
 
-### 2.2.5 Car Value Service (v3.0.0)
-- **Purpose**: Provide current market values for vehicles and decode VINs
+### 2.2.5 Car Value Service (v4.0.0)
+- **Purpose**: Provide current market values for vehicles, decode VINs, and calculate Naredba 24 compliant repair costs
 - **Technology**: Python FastAPI with web scraping (httpx, BeautifulSoup) and NHTSA API
 - **Port**: 8003
 - **Data Sources**: On-demand scraping (cars.bg, mobile.bg), NHTSA VIN API
 - **Caching**: Redis (24h TTL for prices, permanent for VIN decodes)
+- **Naredba 24**: Full compliance with depreciation (чл. 12), labor norms (Глава III), paint costs (Глава IV)
+- **Details**: See `docs/naredba24-implementation-status.md` for full implementation status
 
 ### 2.2.6 Nominatim (Geocoding)
 - **Purpose**: Convert addresses to coordinates
@@ -2413,6 +2415,7 @@ Host: localhost:8002
 | 1.0.0 | 2024-01 | Initial release |
 | 2.0.0 | 2024-06 | Added Momentum 360, Impact Theory, multi-source car values |
 | 2.0.0 | 2024-11 | Car Value Service v3.0.0: VIN decoding, on-demand scraping, removed DB storage. Gateway: VIN extraction in LLM prompt. Database: Removed unused price tables. LLM: 4 GPUs (was 6). |
+| 3.0.0 | 2025-12 | Car Value Service v4.0.0: Full Naredba 24 compliance (depreciation, labor norms, paint costs). ATE Report optimization: removed duplicate sections, ~4.5 tokens/s generation speed. See `docs/naredba24-implementation-status.md`. |
 
 ---
 
