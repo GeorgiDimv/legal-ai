@@ -107,6 +107,10 @@ Important instructions:
 14. IMPORTANT: Always extract VIN if present - it is exactly 17 characters (e.g. WVWZZZ1KZAW123456)
 15. VIN may appear as "VIN:", "Рама №", "Шаси №" in documents - ALWAYS include it if found
 16. IMPORTANT: Always extract damaged_parts as a list - parse damage description into individual parts
+17. CRITICAL: Each vehicle MUST have a UNIQUE VIN - NEVER assign the same VIN to multiple vehicles!
+18. CRITICAL: Each vehicle has its own registration number - extract EACH vehicle's registration separately
+19. Look for vehicle data in separate sections/blocks - match VIN, registration, make, model, year to the correct vehicle
+20. If a vehicle is missing data, use null - do NOT copy data from another vehicle
 
 JSON Response:"""
 
