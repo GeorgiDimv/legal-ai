@@ -853,11 +853,13 @@ async def process_extraction_result(
             }
             defaults = default_angles.get(collision_type, default_angles["head_on"])
 
-            # Build vehicle params with logging
-            va_alpha = v_a.get("pre_impact_angle_deg") or defaults["a_alpha"]
-            va_beta = v_a.get("post_impact_angle_deg") or defaults["a_beta"]
-            vb_alpha = v_b.get("pre_impact_angle_deg") or defaults["b_alpha"]
-            vb_beta = v_b.get("post_impact_angle_deg") or defaults["b_beta"]
+            # Always use default angles based on collision type for consistency
+            # LLM angle extraction is unreliable when document doesn't have explicit direction data
+            # This gives consistent physics results across runs
+            va_alpha = defaults["a_alpha"]
+            va_beta = defaults["a_beta"]
+            vb_alpha = defaults["b_alpha"]
+            vb_beta = defaults["b_beta"]
             logger.info(f"Physics params: collision_type={collision_type}, A_angles=({va_alpha},{va_beta}), B_angles=({vb_alpha},{vb_beta})")
 
             physics_result = await calculate_momentum_360(
