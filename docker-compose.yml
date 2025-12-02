@@ -19,8 +19,6 @@ services:
       --quantization awq_marlin
       --trust-remote-code
       --max-num-seqs 8
-      --enforce-eager
-      --disable-custom-all-reduce
     deploy:
       resources:
         reservations:

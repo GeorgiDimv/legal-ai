@@ -1378,7 +1378,7 @@ async def generate_ate_report(request: ATEReportRequest):
 ВАЖНО: Директно генерирайте доклада. Не описвайте какво ще направите.
 
 Върнете JSON с ключ "report_text" съдържащ пълния текст на доклада (минимум 2000 думи):
-{{"report_text": "[ТУК НАПИШЕТЕ ЦЕЛИЯ ДОКЛАД]", "sections": {{}}}}
+{{"report_text": "[ТУК НАПИШЕТЕ ЦЕЛИЯ ДОКЛАД]"}}
 """
 
             # Estimate input tokens conservatively (Cyrillic ~2.5 chars/token with Qwen)
@@ -1411,13 +1411,13 @@ async def generate_ate_report(request: ATEReportRequest):
             try:
                 report_data = json.loads(content)
             except json.JSONDecodeError:
-                report_data = {"report_text": content, "sections": {}}
+                report_data = {"report_text": content}
 
             processing_time = time.time() - start_time
 
             return ATEReportResponse(
                 report_text=report_data.get("report_text", content),
-                report_sections=report_data.get("sections", {}),
+                report_sections={},  # No longer used - saves output tokens
                 sources_cited=sources if sources else ["Наредба № 24/2019 г.", "Учебник АТЕ II"],
                 processing_time_seconds=round(processing_time, 2)
             )

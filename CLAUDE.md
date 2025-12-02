@@ -193,9 +193,9 @@ V1y = (m1*V1'*sin(β1) + m2*V2'*sin(β2)) / m1*sin(α1)
 V1 = sqrt(V1x² + V1y²)
 ```
 
-## Car Value Service (v3.4.0)
+## Car Value Service (v4.0.0)
 
-On-demand price scraper with VIN decoding and parts pricing (no database required):
+On-demand price scraper with VIN decoding, parts pricing, and **full Naredba 24 compliance**:
 
 ### Data Flow
 1. **Check Redis cache** (24h TTL for prices/parts, permanent for VIN)
@@ -211,7 +211,10 @@ On-demand price scraper with VIN decoding and parts pricing (no database require
 | `GET /vin/{vin}` | Decode VIN via NHTSA API (make, model, year, country) |
 | `GET /value-by-vin/{vin}` | Decode VIN + lookup market value |
 | `GET /value/{make}/{model}/{year}` | Get car market value (on-demand scrape) |
-| `POST /parts/search` | Search for parts prices across Bulgarian websites |
+| `POST /parts/search` | Search for parts prices with full Naredba 24 compliance |
+| `GET /naredba24/coefficient/{make}/{year}` | Get depreciation coefficient (чл. 12) |
+| `GET /naredba24/labor/{part_name}` | Get labor hours from structured table (Глава III) |
+| `GET /naredba24/paint` | Calculate paint costs (Глава IV) |
 
 ### VIN Decoding
 - **Primary**: NHTSA vPIC API (free, no API key, works for EU vehicles)
@@ -234,6 +237,47 @@ BMW, Mercedes-Benz, Audi, Volkswagen, Toyota, Opel, Ford, Renault, Peugeot, Skod
 2. LLM extracts `damaged_parts` list (e.g., ["front bumper", "headlight left"])
 3. Gateway searches Bulgarian websites for real-time parts prices
 4. Returns both LLM estimate and web-scraped parts breakdown
+
+### Naredba 24 Compliance (v4.0.0)
+
+Full implementation of Bulgarian ATE regulation for accurate repair cost estimation:
+
+#### Depreciation Coefficients (чл. 12)
+- **Eastern vehicles** (Lada, Dacia, Hyundai, Kia, etc.): 0.20-0.50
+- **Western vehicles** (BMW, Mercedes, VW, etc.): 0.40-1.00
+- Age brackets: 0-3, 4-7, 8-14, 15+ years
+- Special adjustments for Peugeot, Opel, Citroen, Ford
+
+#### Vehicle Classes (чл. 13)
+| Class | Length | Examples |
+|-------|--------|----------|
+| A | <4.00m | Smart, Fiat 500, Mini |
+| B | 4.00-4.60m | Golf, Focus, Corolla |
+| C | >4.60m | BMW 5, Audi A6, Passat |
+| D | SUV/Van | X5, Land Cruiser, Transit |
+
+#### Labor Norms (Глава III)
+- **40+ parts** with structured hours per vehicle class
+- Examples: Front bumper (0.8-1.4h), Front fender (2.8-4.0h), Door (1.9-3.0h)
+- Automatic translation: English part names → Bulgarian
+
+#### Paint Costs (Глава IV)
+- Labor hours per panel per vehicle class
+- Materials: Standard (80-150 BGN), Metallic (120-220 BGN), Special (180-350 BGN)
+- Color matching: 1.0 hour fixed
+- Oven drying: 1.5-4.5 hours by panel count
+
+#### Total Repair Cost Formula
+```
+total_repair_cost = parts_after_depreciation + labor_cost + paint_cost
+
+Where:
+- parts_after_depreciation = scraped_price × depreciation_coefficient
+- labor_cost = labor_hours × hourly_rate_by_work_type
+- paint_cost = paint_labor + paint_materials + color_matching + oven_drying
+```
+
+See `docs/naredba24-implementation-status.md` for full details and potential gaps.
 
 ## RAG Service (Автотехническа Експертиза Knowledge Base)
 
@@ -509,8 +553,9 @@ The `/generate-ate-report` endpoint uses 2 sequential LLM calls:
 
 ## Notes
 
-- LLM requires 6 GPUs with tensor parallelism; first startup downloads ~20GB model
-- LLM context window increased to 16k tokens (from 8k) with 6 GPUs
+- LLM requires 4 GPUs with tensor parallelism; first startup downloads ~20GB model
+- LLM context window is 16k tokens; generation speed ~2.4 tokens/s
+- ATE reports use optimized token budget: ~7k input, 4k max output (trimmed from full extraction)
 - RAG embedding model runs on CPU to preserve GPU for LLM
 - Nominatim takes 30-60 minutes on first run to import Bulgaria OSM data
 - All monetary values are in Bulgarian Lev (BGN)
@@ -519,3 +564,9 @@ The `/generate-ate-report` endpoint uses 2 sequential LLM calls:
 - mobile.bg uses special URL slugs: `volkswagen` → `vw`, `mercedes-benz` → `mercedes-benz`
 - VIN extraction from documents looks for "VIN:", "Рама №", "Шаси №" patterns
 - GPU persistence mode enabled (`nvidia-smi -pm 1`) to prevent Xid 79 crashes
+- Naredba 24 labor norms now use structured tables (faster than RAG lookup)
+- Token estimation for Cyrillic: ~2.5 chars/token with Qwen model
+
+## Documentation
+
+- `docs/naredba24-implementation-status.md`: Full Naredba 24 compliance status and gaps
