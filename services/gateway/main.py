@@ -850,19 +850,26 @@ async def process_extraction_result(
             }
             defaults = default_angles.get(collision_type, default_angles["head_on"])
 
+            # Build vehicle params with logging
+            va_alpha = v_a.get("pre_impact_angle_deg") or defaults["a_alpha"]
+            va_beta = v_a.get("post_impact_angle_deg") or defaults["a_beta"]
+            vb_alpha = v_b.get("pre_impact_angle_deg") or defaults["b_alpha"]
+            vb_beta = v_b.get("post_impact_angle_deg") or defaults["b_beta"]
+            logger.info(f"Physics params: collision_type={collision_type}, A_angles=({va_alpha},{va_beta}), B_angles=({vb_alpha},{vb_beta})")
+
             physics_result = await calculate_momentum_360(
                 vehicle_a={
                     "mass_kg": v_a.get("mass_kg") or 1400,
                     "post_impact_travel_m": v_a.get("post_impact_travel_m") or 5.0,
-                    "alpha_deg": v_a.get("pre_impact_angle_deg") or defaults["a_alpha"],
-                    "beta_deg": v_a.get("post_impact_angle_deg") or defaults["a_beta"],
+                    "alpha_deg": va_alpha,
+                    "beta_deg": va_beta,
                     "final_velocity_ms": 0
                 },
                 vehicle_b={
                     "mass_kg": v_b.get("mass_kg") or 1400,
                     "post_impact_travel_m": v_b.get("post_impact_travel_m") or 5.0,
-                    "alpha_deg": v_b.get("pre_impact_angle_deg") or defaults["b_alpha"],
-                    "beta_deg": v_b.get("post_impact_angle_deg") or defaults["b_beta"],
+                    "alpha_deg": vb_alpha,
+                    "beta_deg": vb_beta,
                     "final_velocity_ms": 0
                 },
                 friction_coefficient=friction,
@@ -872,6 +879,7 @@ async def process_extraction_result(
             )
 
             if physics_result:
+                logger.info(f"Raw physics result: pre_a={physics_result.get('vehicle_a_impact_velocity_kmh')}, post_a={physics_result.get('vehicle_a_post_impact_kmh')}")
                 physics_data = PhysicsAnalysis(
                     vehicle_a_post_impact_kmh=physics_result.get("vehicle_a_post_impact_kmh"),
                     vehicle_b_post_impact_kmh=physics_result.get("vehicle_b_post_impact_kmh"),
