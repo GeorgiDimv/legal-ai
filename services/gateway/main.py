@@ -1355,14 +1355,14 @@ async def generate_ate_report(request: ATEReportRequest):
 {{"report_text": "[ТУК НАПИШЕТЕ ЦЕЛИЯ ДОКЛАД]", "sections": {{}}}}
 """
 
-            # Estimate input tokens (rough: 1 token ≈ 4 chars for Cyrillic)
+            # Estimate input tokens (Cyrillic uses ~2 chars per token, be conservative)
             prompt_chars = len(report_prompt) + 150  # +150 for system prompt
-            estimated_input_tokens = prompt_chars // 3  # Conservative estimate for Cyrillic
+            estimated_input_tokens = prompt_chars // 2  # Conservative: 2 chars per token for Cyrillic
 
             # Calculate max_tokens to stay within 16k context
             max_context = 16384
-            available_tokens = max_context - estimated_input_tokens - 100  # 100 token buffer
-            max_output_tokens = min(5000, max(1000, available_tokens))  # Between 1000-5000
+            available_tokens = max_context - estimated_input_tokens - 200  # 200 token buffer
+            max_output_tokens = min(3500, max(1000, available_tokens))  # Between 1000-3500
 
             logger.info(f"Report generation: ~{estimated_input_tokens} input tokens, {max_output_tokens} max output")
 
