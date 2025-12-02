@@ -841,11 +841,14 @@ async def process_extraction_result(
             v_b = raw_vehicles[1]
 
             # Determine default angles based on collision type if not provided
+            # Angles: α (alpha) = pre-impact direction, β (beta) = post-impact direction
+            # 0° = East, 90° = North, 180° = West, 270° = South
             collision_type = collision_details.get("collision_type", "head_on")
             default_angles = {
                 "head_on": {"a_alpha": 0, "a_beta": 180, "b_alpha": 180, "b_beta": 0},
                 "rear_end": {"a_alpha": 0, "a_beta": 0, "b_alpha": 0, "b_beta": 0},
-                "side_impact": {"a_alpha": 0, "a_beta": 90, "b_alpha": 90, "b_beta": 0},
+                # side_impact: lane-change sideswipe - both traveling same direction, small deflection
+                "side_impact": {"a_alpha": 0, "a_beta": 45, "b_alpha": 0, "b_beta": 315},
                 "angle": {"a_alpha": 0, "a_beta": 45, "b_alpha": 135, "b_beta": 180}
             }
             defaults = default_angles.get(collision_type, default_angles["head_on"])
