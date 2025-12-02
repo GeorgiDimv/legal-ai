@@ -862,66 +862,74 @@ async def get_labor_hours_from_rag(part_name: str) -> Optional[float]:
             logger.warning(f"Redis read error: {e}")
 
     try:
+        import re
         async with httpx.AsyncClient(timeout=10) as client:
             # Search for labor norm in Naredba 24
-            # Use specific context that matches the document structure
-            query = f"{part_name} подмяна детайли технологични часове"
-            response = await client.post(
-                f"{RAG_URL}/search",
-                json={"query": query, "limit": 5}
-            )
+            # Try multiple query formats to find the right chunk
+            queries = [
+                f"{part_name} технологични часове група автомобили",
+                f"Подмяна детайли {part_name} часове",
+                f"{part_name} 0,6 0,8 1,0 часове",  # Match numeric table format
+            ]
 
-            if response.status_code == 200:
+            for query in queries:
+                response = await client.post(
+                    f"{RAG_URL}/search",
+                    json={"query": query, "limit": 5}
+                )
+
+                if response.status_code != 200:
+                    continue
+
                 data = response.json()
                 results = data.get("results", [])
 
-                if results:
-                    # Parse the text to extract hours
-                    # Naredba 24 format: "20. Праг 7,5 8,5 9,5 10" (number. part hours1 hours2 hours3 hours4)
-                    import re
+                if not results:
+                    continue
 
-                    for result in results:
-                        text = result.get("text", "")
-                        part_lower = part_name.lower()
+                # Parse the text to extract hours
+                # Naredba 24 format: "20. Праг 7,5 8,5 9,5 10" (number. part hours1 hours2 hours3 hours4)
+                part_lower = part_name.lower()
 
-                        # Try multiple patterns to find the part and its hours
-                        # Pattern 1: "20. Праг 7,5 8,5 9,5 10" - numbered list format
-                        # Pattern 2: "Праг 7,5 8,5" - simple format
-                        patterns = [
-                            # Numbered format: "20. Праг 7,5 8,5 9,5 10"
-                            rf'\d+\.\s*{re.escape(part_lower)}\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
-                            # Simple format: "Праг 7,5 8,5"
-                            rf'{re.escape(part_lower)}\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
-                        ]
+                for result in results:
+                    text = result.get("text", "")
 
-                        for pattern in patterns:
-                            match = re.search(pattern, text.lower(), re.IGNORECASE)
-                            if match:
-                                numbers_str = match.group(1)
-                                # Extract all numbers from the matched string
-                                numbers = re.findall(r'(\d+[,.]?\d*)', numbers_str)
-                                if numbers:
-                                    # Take average of vehicle classes (usually 4 values)
-                                    valid_hours = []
-                                    for num_str in numbers[:4]:  # Max 4 vehicle classes
+                    # Try multiple patterns to find the part and its hours
+                    patterns = [
+                        # Numbered format: "20. Праг 7,5 8,5 9,5 10"
+                        rf'\d+\.\s*{re.escape(part_lower)}\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
+                        # Simple format: "Праг 7,5 8,5"
+                        rf'{re.escape(part_lower)}\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
+                    ]
+
+                    for pattern in patterns:
+                        match = re.search(pattern, text.lower(), re.IGNORECASE)
+                        if match:
+                            numbers_str = match.group(1)
+                            # Extract all numbers from the matched string
+                            numbers = re.findall(r'(\d+[,.]?\d*)', numbers_str)
+                            if numbers:
+                                # Take average of vehicle classes (usually 4 values)
+                                valid_hours = []
+                                for num_str in numbers[:4]:  # Max 4 vehicle classes
+                                    try:
+                                        h = float(num_str.replace(",", "."))
+                                        if 0.1 <= h <= 50:  # Sanity check
+                                            valid_hours.append(h)
+                                    except:
+                                        continue
+
+                                if valid_hours:
+                                    # Use average across vehicle classes
+                                    avg_hours = round(sum(valid_hours) / len(valid_hours), 1)
+                                    # Cache the result
+                                    if redis_client:
                                         try:
-                                            h = float(num_str.replace(",", "."))
-                                            if 0.1 <= h <= 50:  # Sanity check
-                                                valid_hours.append(h)
-                                        except:
-                                            continue
-
-                                    if valid_hours:
-                                        # Use average across vehicle classes
-                                        avg_hours = round(sum(valid_hours) / len(valid_hours), 1)
-                                        # Cache the result
-                                        if redis_client:
-                                            try:
-                                                redis_client.setex(cache_key, LABOR_NORM_CACHE_TTL, str(avg_hours))
-                                            except Exception as e:
-                                                logger.warning(f"Redis write error: {e}")
-                                        logger.info(f"Labor norm from RAG: {part_name} = {avg_hours}h (from {valid_hours})")
-                                        return avg_hours
+                                            redis_client.setex(cache_key, LABOR_NORM_CACHE_TTL, str(avg_hours))
+                                        except Exception as e:
+                                            logger.warning(f"Redis write error: {e}")
+                                    logger.info(f"Labor norm from RAG: {part_name} = {avg_hours}h (from {valid_hours})")
+                                    return avg_hours
 
     except Exception as e:
         logger.warning(f"RAG labor norm lookup failed for {part_name}: {e}")
