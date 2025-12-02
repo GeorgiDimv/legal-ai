@@ -1177,10 +1177,29 @@ async def generate_ate_report(request: ATEReportRequest):
             report_data_json = json.dumps(report_data, indent=2, ensure_ascii=False, default=str)
             logger.info(f"Report data size: {len(report_data_json)} chars")
 
+            # Extract physics values for explicit injection (LLM tends to ignore nested JSON)
+            physics = report_data.get("physics_analysis", {})
+            speed_a = physics.get("vehicle_a_pre_impact_kmh", "неизвестна")
+            speed_b = physics.get("vehicle_b_pre_impact_kmh", "неизвестна")
+            delta_v = physics.get("delta_v_a_kmh", "неизвестна")
+            physics_method = physics.get("physics_method", "неизвестен")
+
             # Generate ATE report using LLM with RAG context
             report_prompt = f"""/no_think
 Генерирайте професионална Автотехническа Експертиза (АТЕ) на български език.
 НЕ обяснявайте какво ще направите - директно напишете доклада.
+
+══════════════════════════════════════════════════════════════════════════════
+ИЗЧИСЛЕНИ СКОРОСТИ (ЗАДЪЛЖИТЕЛНО ИЗПОЛЗВАЙТЕ ТЕЗИ СТОЙНОСТИ):
+══════════════════════════════════════════════════════════════════════════════
+• МПС А (първо превозно средство) преди удара: {speed_a} км/ч
+• МПС Б (второ превозно средство) преди удара: {speed_b} км/ч
+• Промяна на скоростта (Delta-V): {delta_v} км/ч
+• Метод на изчисление: {physics_method}
+
+ВНИМАНИЕ: Горните скорости са изчислени чрез физичен анализ.
+НЕ използвайте скорости споменати от свидетели или в документи - те са непроверени!
+══════════════════════════════════════════════════════════════════════════════
 
 РЕГУЛАТОРНИ И МЕТОДОЛОГИЧНИ РЕФЕРЕНЦИИ:
 {ate_knowledge}
