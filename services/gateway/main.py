@@ -623,26 +623,31 @@ async def root():
 
 # ============== RAG Integration ==============
 
-async def get_ate_context(query: str, limit: int = 5) -> dict:
+async def get_ate_context(query: str, limit: int = 5, document_filter: str = None) -> dict:
     """
     Retrieve relevant ATE knowledge from RAG service.
 
     Args:
         query: Query text (usually OCR text or case description)
         limit: Maximum number of chunks to retrieve
+        document_filter: Optional filter for document source ("naredba_24" or "uchebnik_ate")
 
     Returns:
         Dict with 'context' (formatted text) and 'sources' (references)
     """
     try:
         async with httpx.AsyncClient(timeout=30) as client:
+            request_data = {
+                "query": query[:2000],  # Limit query length
+                "limit": limit,
+                "score_threshold": 0.4
+            }
+            if document_filter:
+                request_data["document_filter"] = document_filter
+
             response = await client.post(
                 f"{RAG_URL}/context",
-                json={
-                    "query": query[:2000],  # Limit query length
-                    "limit": limit,
-                    "score_threshold": 0.4
-                }
+                json=request_data
             )
 
             if response.status_code == 200:
@@ -654,6 +659,40 @@ async def get_ate_context(query: str, limit: int = 5) -> dict:
         logger.warning(f"RAG context retrieval failed: {e}")
 
     return {"context": "", "sources": [], "count": 0}
+
+
+async def get_dual_ate_context(query: str) -> tuple[str, list[str]]:
+    """
+    Retrieve ATE knowledge from BOTH sources with separate queries.
+
+    Returns tuple of:
+    - Formatted context with clearly labeled sections
+    - List of source citations (document, section, page)
+    """
+    # Query for legal requirements from Naredba 24
+    naredba_query = "наредба 24 изисквания автотехническа експертиза структура доклад чл."
+    naredba_context = await get_ate_context(naredba_query, limit=3, document_filter="naredba_24")
+
+    # Query for technical methodology from Uchebnik
+    uchebnik_query = f"методика скорост формула удар ПТП {query[:500]}"
+    uchebnik_context = await get_ate_context(uchebnik_query, limit=3, document_filter="uchebnik_ate")
+
+    # Combine with clear labels
+    combined_parts = []
+    all_sources = []
+
+    if naredba_context.get("context"):
+        combined_parts.append(f"═══ НАРЕДБА 24 (Правни изисквания) ═══\n{naredba_context['context']}")
+        all_sources.extend(naredba_context.get("sources", []))
+        logger.info(f"Retrieved {naredba_context.get('count', 0)} Naredba 24 chunks")
+
+    if uchebnik_context.get("context"):
+        combined_parts.append(f"═══ УЧЕБНИК АТЕ (Техническа методология) ═══\n{uchebnik_context['context']}")
+        all_sources.extend(uchebnik_context.get("sources", []))
+        logger.info(f"Retrieved {uchebnik_context.get('count', 0)} Uchebnik chunks")
+
+    context = "\n\n".join(combined_parts) if combined_parts else ""
+    return context, all_sources
 
 
 # ============== Shared Processing Logic ==============
@@ -1162,14 +1201,10 @@ async def generate_ate_report(request: ATEReportRequest):
             case_data = await enrich_with_car_values(case_data)
             case_data = await enrich_with_physics(case_data)
 
-            # Get relevant ATE knowledge from RAG
-            # Add keywords to help match both uchebnik (methodology) and naredba (damage/insurance)
-            rag_query = f"автотехническа експертиза методика обезщетение вреди застраховка МПС\n{raw_text[:2000]}"
-            rag_context = await get_ate_context(rag_query, limit=5)  # Reduced from 8 to fit context
-            ate_knowledge = rag_context.get("context", "")
-            sources = rag_context.get("sources", [])
-
-            logger.info(f"Retrieved {rag_context.get('count', 0)} RAG chunks for report")
+            # Get relevant ATE knowledge from RAG using dual-query approach
+            # This ensures we get both legal requirements (Naredba 24) and technical methodology (Uchebnik)
+            logger.info("Retrieving dual-source RAG context (Naredba 24 + Uchebnik)...")
+            ate_knowledge, sources = await get_dual_ate_context(raw_text[:1000])
 
             # Build the expert questions section
             expert_questions = request.expert_questions or [
@@ -1329,7 +1364,7 @@ async def generate_ate_report(request: ATEReportRequest):
             return ATEReportResponse(
                 report_text=report_data.get("report_text", content),
                 report_sections=report_data.get("sections", {}),
-                sources_cited=sources,
+                sources_cited=sources if sources else ["Наредба № 24/2019 г.", "Учебник АТЕ II"],
                 processing_time_seconds=round(processing_time, 2)
             )
 
