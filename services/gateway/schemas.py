@@ -16,26 +16,62 @@ class LocationData(BaseModel):
 
 
 class PartPricing(BaseModel):
-    """Pricing data for a damaged part."""
+    """Pricing data for a damaged part with Naredba 24 compliance."""
     part_name: str
     part_name_bg: Optional[str] = None
     best_price_bgn: Optional[float] = None
     best_source: Optional[str] = None
     price_range_min_bgn: Optional[float] = None
     price_range_max_bgn: Optional[float] = None
+    # Naredba 24 depreciation (чл. 12)
+    depreciation_coefficient: Optional[float] = Field(None, description="Naredba 24 чл. 12 coefficient")
+    price_after_depreciation_bgn: Optional[float] = Field(None, description="Price after applying depreciation")
+    # Labor (Глава трета)
+    labor_hours: Optional[float] = Field(None, description="Hours from Naredba 24 table")
+    labor_hours_source: Optional[str] = None
+    vehicle_class: Optional[str] = Field(None, description="A, B, C, or D per чл. 13")
     labor_cost_bgn: Optional[float] = None
     total_cost_bgn: Optional[float] = None
 
 
+class PaintEstimate(BaseModel):
+    """Paint cost estimate per Naredba 24 Глава четвърта."""
+    panel_count: int = 0
+    paint_type: str = "metallic"
+    color_matching_hours: float = 0
+    oven_drying_hours: float = 0
+    total_labor_hours: float = 0
+    labor_cost_bgn: float = 0
+    materials_cost_bgn: float = 0
+    total_paint_cost_bgn: float = 0
+    source: str = "Naredba 24 Глава четвърта"
+
+
+class Naredba24Data(BaseModel):
+    """Naredba 24 compliance data for vehicle."""
+    vehicle_origin: Optional[str] = Field(None, description="eastern or western")
+    vehicle_class: Optional[str] = Field(None, description="A, B, C, or D")
+    vehicle_class_explanation: Optional[str] = None
+    depreciation_coefficient: Optional[float] = None
+    depreciation_explanation: Optional[str] = None
+
+
 class PartsEstimate(BaseModel):
-    """Parts pricing estimate from web search."""
+    """Parts pricing estimate with Naredba 24 compliance."""
     parts: List[PartPricing] = Field(default_factory=list)
-    total_parts_cost_bgn: Optional[float] = None
+    # Naredba 24 compliance
+    naredba_24: Optional[Naredba24Data] = None
+    paint_estimate: Optional[PaintEstimate] = None
+    # Costs
+    total_parts_cost_raw_bgn: Optional[float] = Field(None, description="Before depreciation")
+    total_parts_cost_bgn: Optional[float] = Field(None, description="After depreciation")
+    depreciation_savings_bgn: Optional[float] = Field(None, description="Savings from depreciation")
     total_labor_cost_bgn: Optional[float] = None
+    total_paint_cost_bgn: Optional[float] = None
     total_repair_cost_bgn: Optional[float] = None
     parts_found: int = 0
     parts_not_found: int = 0
-    source: str = "web_search"
+    source: str = "Naredba 24 (чл. 12, 13, Глава III-IV)"
 
 
 class VehicleData(BaseModel):

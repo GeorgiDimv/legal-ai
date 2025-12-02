@@ -7,6 +7,7 @@ Features:
 2. On-demand scraping from cars.bg, mobile.bg
 3. Redis caching (24h for prices, forever for VIN)
 4. Parts pricing via web search (autodoc.bg, autopower.bg, alo.bg)
+5. Naredba 24 compliant estimation (depreciation, labor norms, paint)
 """
 
 import os
@@ -14,7 +15,7 @@ import re
 import json
 import logging
 import asyncio
-from typing import Optional, List, Dict
+from typing import Optional, List, Dict, Tuple
 from datetime import datetime
 from urllib.parse import quote_plus
 
@@ -28,9 +29,433 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Car Value Service",
-    description="Bulgarian car market value + VIN decoder + parts pricing",
-    version="3.3.0"
+    description="Bulgarian car market value + VIN decoder + parts pricing + Naredba 24 compliance",
+    version="4.0.0"
 )
+
+# =============================================================================
+# NAREDBA 24 COMPLIANCE - Vehicle Origin & Depreciation
+# =============================================================================
+
+# Vehicle origin classification (Naredba 24 чл. 12)
+EASTERN_MAKES = {
+    # Former Soviet bloc + South Korea (per Naredba 24)
+    "lada", "vaz", "moskvitch", "gaz", "uaz", "zaz", "izh",  # Russia/USSR
+    "dacia",  # Romania (old models before Super Nova)
+    "skoda",  # Czech (old models before Favorit)
+    "trabant", "wartburg",  # East Germany
+    "polonez", "fso",  # Poland
+    "oltcit", "aro",  # Romania
+    "zastava", "yugo",  # Yugoslavia
+    "volga",  # Russia
+    "hyundai", "kia", "daewoo", "ssangyong", "genesis",  # South Korea
+}
+
+# Western makes that are actually new Skoda/Dacia (after specific models)
+WESTERN_SKODA_MODELS = {"octavia", "fabia", "superb", "kodiaq", "karoq", "scala", "kamiq", "enyaq"}
+WESTERN_DACIA_MODELS = {"logan", "sandero", "duster", "jogger", "spring"}  # After Super Nova
+
+# Special coefficient adjustments (Naredba 24 notes)
+SPECIAL_MAKE_ADJUSTMENTS = {
+    "peugeot": {"max_years": 7, "coefficient": 0.70},  # До 7 години = 0.70
+    "opel": {"all_years": True, "adjustment": -0.10},  # Намалява се с 10%
+    "citroen": {"max_years": 10, "adjustment": -0.10},  # До 10 години = -10%
+    "ford": {"all_years": True, "adjustment": -0.10},  # Намалява се с 10%
+}
+
+# Depreciation coefficients by vehicle age (Naredba 24 чл. 12)
+# Eastern European vehicles
+EASTERN_COEFFICIENTS = {
+    3: 0.50,   # до 3 г. вкл.
+    7: 0.35,   # от 4 до 7 г. вкл.
+    14: 0.30,  # от 8 до 14 г. вкл.
+    99: 0.20,  # над 15 г.
+}
+
+# Western vehicles (including new Skoda after Favorit, new Dacia after Super Nova)
+WESTERN_COEFFICIENTS = {
+    3: 1.00,   # до 3 г. вкл.
+    7: 0.70,   # от 4 до 7 г. вкл.
+    14: 0.50,  # от 8 до 14 г. вкл.
+    99: 0.40,  # над 15 г.
+}
+
+
+def get_vehicle_origin(make: str, model: Optional[str] = None) -> str:
+    """
+    Determine vehicle origin for Naredba 24 coefficient selection.
+
+    Returns: "eastern" or "western"
+    """
+    make_lower = make.lower().strip()
+    model_lower = (model or "").lower().strip()
+
+    # Check if it's a "new" Skoda (after Favorit = western)
+    if make_lower == "skoda":
+        if model_lower in WESTERN_SKODA_MODELS or not model_lower:
+            # Assume new Skoda if no model or if model is known western
+            return "western"
+        return "eastern"
+
+    # Check if it's a "new" Dacia (after Super Nova = western)
+    if make_lower == "dacia":
+        if model_lower in WESTERN_DACIA_MODELS or not model_lower:
+            return "western"
+        return "eastern"
+
+    # Check against eastern makes list
+    if make_lower in EASTERN_MAKES:
+        return "eastern"
+
+    return "western"
+
+
+def get_depreciation_coefficient(make: str, model: Optional[str], year: int) -> Tuple[float, str]:
+    """
+    Calculate parts depreciation coefficient per Naredba 24 чл. 12.
+
+    Returns: (coefficient, explanation)
+    """
+    current_year = datetime.now().year
+    vehicle_age = current_year - year
+
+    origin = get_vehicle_origin(make, model)
+    coefficients = EASTERN_COEFFICIENTS if origin == "eastern" else WESTERN_COEFFICIENTS
+
+    # Find applicable coefficient by age bracket
+    base_coefficient = 0.40  # Default for very old vehicles
+    age_bracket = "над 15 г."
+
+    for max_age, coef in sorted(coefficients.items()):
+        if vehicle_age <= max_age:
+            base_coefficient = coef
+            if max_age == 3:
+                age_bracket = "до 3 г."
+            elif max_age == 7:
+                age_bracket = "4-7 г."
+            elif max_age == 14:
+                age_bracket = "8-14 г."
+            else:
+                age_bracket = "над 15 г."
+            break
+
+    # Apply special make adjustments
+    make_lower = make.lower().strip()
+    adjustment_note = ""
+
+    if make_lower in SPECIAL_MAKE_ADJUSTMENTS:
+        spec = SPECIAL_MAKE_ADJUSTMENTS[make_lower]
+
+        if spec.get("coefficient") and vehicle_age <= spec.get("max_years", 0):
+            # Peugeot special case: fixed coefficient for young vehicles
+            base_coefficient = spec["coefficient"]
+            adjustment_note = f" (Peugeot ≤{spec['max_years']}г. = {spec['coefficient']})"
+        elif spec.get("adjustment"):
+            if spec.get("all_years") or vehicle_age <= spec.get("max_years", 99):
+                base_coefficient = max(0.20, base_coefficient + spec["adjustment"])
+                adjustment_note = f" ({make} {spec['adjustment']:+.0%})"
+
+    explanation = f"Naredba 24 чл.12: {origin} производство, {age_bracket}, коеф. {base_coefficient}{adjustment_note}"
+
+    return base_coefficient, explanation
+
+
+# =============================================================================
+# NAREDBA 24 - Vehicle Classes by Length (чл. 13)
+# =============================================================================
+
+# Vehicle class by габаритна дължина (length in meters)
+VEHICLE_CLASSES = {
+    "A": {"max_length": 4.00, "name": "клас А", "description": "L < 4.00m"},
+    "B": {"max_length": 4.60, "name": "клас B", "description": "4.00m ≤ L < 4.60m"},
+    "C": {"max_length": 99.0, "name": "клас C", "description": "L ≥ 4.60m"},
+    "D": {"max_length": 99.0, "name": "клас D", "description": "Джипове дълга база, фургони, пикапи"},
+}
+
+# Approximate vehicle lengths by make/model (for when we don't have exact data)
+VEHICLE_LENGTH_ESTIMATES = {
+    # Class A (compact/small) - L < 4.00m
+    "smart": 2.7, "fiat 500": 3.6, "toyota aygo": 3.5, "peugeot 108": 3.5,
+    "vw up": 3.6, "hyundai i10": 3.7, "kia picanto": 3.6, "suzuki swift": 3.9,
+    "mini": 3.8, "fiat panda": 3.7, "opel corsa": 4.0,
+
+    # Class B (medium) - 4.00m ≤ L < 4.60m
+    "vw golf": 4.3, "ford focus": 4.4, "opel astra": 4.4, "peugeot 308": 4.4,
+    "toyota corolla": 4.4, "honda civic": 4.5, "mazda 3": 4.5, "skoda octavia": 4.7,
+    "bmw 1": 4.3, "audi a3": 4.3, "mercedes a": 4.4,
+
+    # Class C (large) - L ≥ 4.60m
+    "bmw 3": 4.7, "bmw 5": 5.0, "bmw 7": 5.3, "audi a4": 4.8, "audi a6": 4.9,
+    "audi a8": 5.2, "mercedes c": 4.7, "mercedes e": 4.9, "mercedes s": 5.2,
+    "vw passat": 4.8, "skoda superb": 4.9, "toyota camry": 4.9,
+
+    # Class D (SUV/Jeep long base, vans, pickups)
+    "land rover": 4.8, "jeep": 4.5, "toyota land cruiser": 4.9, "nissan patrol": 5.1,
+    "vw touareg": 4.9, "bmw x5": 4.9, "audi q7": 5.1, "mercedes gle": 4.9,
+    "ford ranger": 5.4, "toyota hilux": 5.3, "vw amarok": 5.2,
+    "vw transporter": 4.9, "mercedes vito": 5.1, "ford transit": 5.5,
+}
+
+# Body types that are always Class D
+CLASS_D_BODY_TYPES = {"suv", "jeep", "pickup", "van", "фургон", "пикап", "джип"}
+
+
+def get_vehicle_class(make: str, model: Optional[str] = None,
+                      body_type: Optional[str] = None,
+                      length_m: Optional[float] = None) -> Tuple[str, str]:
+    """
+    Determine vehicle class per Naredba 24 чл. 13.
+
+    Returns: (class_letter, explanation)
+    """
+    # If exact length provided
+    if length_m:
+        if length_m < 4.00:
+            return "A", f"клас А (L={length_m}m < 4.00m)"
+        elif length_m < 4.60:
+            return "B", f"клас B (4.00m ≤ L={length_m}m < 4.60m)"
+        else:
+            return "C", f"клас C (L={length_m}m ≥ 4.60m)"
+
+    # Check body type for Class D
+    if body_type:
+        body_lower = body_type.lower()
+        for d_type in CLASS_D_BODY_TYPES:
+            if d_type in body_lower:
+                return "D", f"клас D ({body_type})"
+
+    # Estimate from make/model
+    make_lower = make.lower().strip()
+    model_lower = (model or "").lower().strip()
+    search_key = f"{make_lower} {model_lower}".strip()
+
+    # Check model-specific estimates first
+    for key, length in VEHICLE_LENGTH_ESTIMATES.items():
+        if key in search_key or search_key in key:
+            if length < 4.00:
+                return "A", f"клас А (~{length}m)"
+            elif length < 4.60:
+                return "B", f"клас B (~{length}m)"
+            else:
+                return "C", f"клас C (~{length}m)"
+
+    # Check make-only estimates
+    for key, length in VEHICLE_LENGTH_ESTIMATES.items():
+        if make_lower in key:
+            if length < 4.00:
+                return "A", f"клас А (~{length}m, {make})"
+            elif length < 4.60:
+                return "B", f"клас B (~{length}m, {make})"
+            else:
+                return "C", f"клас C (~{length}m, {make})"
+
+    # Default to Class B (most common)
+    return "B", "клас B (по подразбиране)"
+
+
+# =============================================================================
+# NAREDBA 24 - Structured Labor Norms (Глава трета)
+# =============================================================================
+
+# Labor norms in hours by vehicle class [A, B, C, D]
+# From Naredba 24 Раздел I "Подмяна на нови детайли"
+LABOR_NORMS_REPLACEMENT = {
+    # Body panels
+    "предна броня": [0.8, 1.0, 1.2, 1.4],
+    "задна броня": [0.8, 1.0, 1.2, 1.4],
+    "преден капак": [0.6, 0.7, 1.0, 1.2],
+    "заден капак": [0.6, 0.7, 1.0, 1.2],
+    "преден калник": [2.8, 3.0, 3.5, 4.0],  # на болтове
+    "заден калник": [5.0, 6.0, 7.0, 8.0],
+    "врата": [1.9, 2.0, 2.5, 3.0],  # base, add complexity
+    "предна врата": [1.9, 2.0, 2.5, 3.0],
+    "задна врата": [1.9, 2.0, 2.5, 3.0],
+    "праг": [7.5, 8.5, 9.5, 10.0],
+    "таван": [12.0, 17.0, 19.0, 21.0],
+    "под": [10.0, 12.0, 14.0, 16.0],
+    "предна колона": [5.0, 5.0, 6.0, 6.0],
+    "средна колона": [5.0, 5.0, 6.0, 6.0],
+    "задна колона": [6.0, 6.0, 7.0, 7.0],
+    "преден рог": [5.0, 8.0, 9.0, 10.0],
+    "заден рог": [5.0, 8.0, 9.0, 10.0],
+
+    # Glass
+    "предно стъкло": [1.5, 2.0, 2.5, 3.0],
+    "задно стъкло": [1.0, 1.5, 2.0, 2.5],
+    "странично стъкло": [0.5, 0.6, 0.8, 1.0],
+
+    # Lights
+    "фар": [0.5, 0.6, 0.8, 1.0],
+    "стоп": [0.3, 0.4, 0.5, 0.6],
+    "мигач": [0.2, 0.3, 0.3, 0.4],
+    "халоген": [0.3, 0.4, 0.5, 0.6],
+
+    # Mirrors
+    "огледало": [0.4, 0.5, 0.6, 0.8],
+    "странично огледало": [0.4, 0.5, 0.6, 0.8],
+
+    # Grille/trim
+    "решетка": [0.3, 0.4, 0.5, 0.6],
+    "предна решетка": [0.3, 0.4, 0.5, 0.6],
+
+    # Mechanical
+    "радиатор": [1.5, 2.0, 2.5, 3.0],
+    "кондензатор": [1.0, 1.5, 2.0, 2.5],
+    "интеркулер": [1.0, 1.5, 2.0, 2.5],
+    "амортисьор": [0.8, 1.0, 1.2, 1.5],
+    "носач": [1.5, 2.0, 2.5, 3.0],
+    "спирачен диск": [0.5, 0.6, 0.8, 1.0],
+    "накладки": [0.4, 0.5, 0.6, 0.8],
+
+    # Interior
+    "табло": [4.0, 5.0, 6.0, 8.0],
+    "волан": [0.5, 0.6, 0.8, 1.0],
+    "седалка": [1.0, 1.2, 1.5, 2.0],
+    "еърбег": [0.5, 0.6, 0.8, 1.0],
+}
+
+# Paint labor norms (Naredba 24 Глава четвърта)
+# Hours per panel by vehicle class [A, B, C, D]
+PAINT_LABOR_NORMS = {
+    "предна броня": [2.5, 3.0, 3.5, 4.0],
+    "задна броня": [2.5, 3.0, 3.5, 4.0],
+    "преден капак": [3.0, 3.5, 4.0, 4.5],
+    "заден капак": [2.5, 3.0, 3.5, 4.0],
+    "преден калник": [2.5, 3.0, 3.5, 4.0],
+    "заден калник": [3.0, 3.5, 4.0, 4.5],
+    "врата": [3.0, 3.5, 4.0, 4.5],
+    "предна врата": [3.0, 3.5, 4.0, 4.5],
+    "задна врата": [3.0, 3.5, 4.0, 4.5],
+    "праг": [2.0, 2.5, 3.0, 3.5],
+    "таван": [5.0, 6.0, 7.0, 8.0],
+    "default": [2.5, 3.0, 3.5, 4.0],  # Default for unlisted parts
+}
+
+# Paint materials cost per panel (BGN) by vehicle class [A, B, C, D]
+PAINT_MATERIALS_COST = {
+    "standard": [80, 100, 120, 150],  # Solid colors
+    "metallic": [120, 150, 180, 220],  # Metallic/pearl
+    "special": [180, 220, 280, 350],  # Special effects (candy, chameleon)
+}
+
+# Color matching (тониране) - fixed cost
+COLOR_MATCHING_HOURS = 1.0
+
+# Oven drying costs by panel count
+OVEN_DRYING_HOURS = {
+    3: 1.5,   # 1-3 panels
+    6: 3.0,   # 4-6 panels
+    99: 4.5,  # >6 panels
+}
+
+
+def get_labor_hours_from_table(part_name: str, vehicle_class: str) -> Optional[Tuple[float, str]]:
+    """
+    Get labor hours from Naredba 24 structured table.
+
+    Returns: (hours, source) or None if not found
+    """
+    part_lower = part_name.lower().strip()
+    class_index = {"A": 0, "B": 1, "C": 2, "D": 3}.get(vehicle_class, 1)
+
+    # Direct match
+    if part_lower in LABOR_NORMS_REPLACEMENT:
+        hours = LABOR_NORMS_REPLACEMENT[part_lower][class_index]
+        return hours, f"Naredba 24 таблица ({vehicle_class})"
+
+    # Partial match
+    for norm_part, hours_list in LABOR_NORMS_REPLACEMENT.items():
+        if norm_part in part_lower or part_lower in norm_part:
+            hours = hours_list[class_index]
+            return hours, f"Naredba 24 таблица ({norm_part}, {vehicle_class})"
+
+    # Check for compound parts (e.g., "ляв преден калник" -> "преден калник")
+    for norm_part, hours_list in LABOR_NORMS_REPLACEMENT.items():
+        norm_words = set(norm_part.split())
+        part_words = set(part_lower.split())
+        if norm_words & part_words:  # Any word match
+            hours = hours_list[class_index]
+            return hours, f"Naredba 24 таблица (~{norm_part}, {vehicle_class})"
+
+    return None
+
+
+def get_paint_hours_from_table(part_name: str, vehicle_class: str) -> Tuple[float, str]:
+    """
+    Get paint labor hours from Naredba 24 table.
+
+    Returns: (hours, source)
+    """
+    part_lower = part_name.lower().strip()
+    class_index = {"A": 0, "B": 1, "C": 2, "D": 3}.get(vehicle_class, 1)
+
+    # Direct match
+    if part_lower in PAINT_LABOR_NORMS:
+        hours = PAINT_LABOR_NORMS[part_lower][class_index]
+        return hours, f"Naredba 24 бояджийски ({vehicle_class})"
+
+    # Partial match
+    for norm_part, hours_list in PAINT_LABOR_NORMS.items():
+        if norm_part in part_lower or part_lower in norm_part:
+            hours = hours_list[class_index]
+            return hours, f"Naredba 24 бояджийски ({norm_part}, {vehicle_class})"
+
+    # Default
+    hours = PAINT_LABOR_NORMS["default"][class_index]
+    return hours, f"Naredba 24 бояджийски (default, {vehicle_class})"
+
+
+def calculate_paint_cost(parts: List[str], vehicle_class: str,
+                         paint_type: str = "metallic",
+                         hourly_rate: float = 60.0) -> Dict:
+    """
+    Calculate complete paint cost per Naredba 24.
+
+    Returns dict with labor hours, materials, oven drying, color matching
+    """
+    class_index = {"A": 0, "B": 1, "C": 2, "D": 3}.get(vehicle_class, 1)
+
+    total_labor_hours = 0
+    total_materials = 0
+    panel_details = []
+
+    for part in parts:
+        hours, source = get_paint_hours_from_table(part, vehicle_class)
+        materials = PAINT_MATERIALS_COST.get(paint_type, PAINT_MATERIALS_COST["metallic"])[class_index]
+
+        total_labor_hours += hours
+        total_materials += materials
+        panel_details.append({
+            "part": part,
+            "labor_hours": hours,
+            "materials_bgn": materials,
+        })
+
+    # Add color matching if any panels need paint
+    color_matching = COLOR_MATCHING_HOURS if parts else 0
+
+    # Add oven drying based on panel count
+    oven_hours = 0
+    for max_panels, hours in sorted(OVEN_DRYING_HOURS.items()):
+        if len(parts) <= max_panels:
+            oven_hours = hours
+            break
+
+    total_labor_hours += color_matching + oven_hours
+    labor_cost = total_labor_hours * hourly_rate
+
+    return {
+        "panels": panel_details,
+        "panel_count": len(parts),
+        "paint_type": paint_type,
+        "color_matching_hours": color_matching,
+        "oven_drying_hours": oven_hours,
+        "total_labor_hours": round(total_labor_hours, 1),
+        "labor_cost_bgn": round(labor_cost, 2),
+        "materials_cost_bgn": round(total_materials, 2),
+        "total_paint_cost_bgn": round(labor_cost + total_materials, 2),
+        "source": "Naredba 24 Глава четвърта",
+    }
 
 # Redis client for caching
 redis_client: Optional[redis.Redis] = None
@@ -830,14 +1255,20 @@ PART_WORK_TYPES = {
 
 
 class PartsSearchRequest(BaseModel):
-    """Request body for parts search."""
+    """Request body for parts search with Naredba 24 compliance."""
     make: str
     model: str
     year: int
     parts: List[str]
     include_labor: bool = True
+    include_paint: bool = True  # Include paint cost calculation
+    include_depreciation: bool = True  # Apply depreciation coefficient to parts
     hourly_rate_bgn: Optional[float] = None  # Override default hourly rate
+    paint_hourly_rate_bgn: Optional[float] = None  # Override paint hourly rate
     work_type_rates: Optional[Dict[str, float]] = None  # Override rates by work type
+    paint_type: str = "metallic"  # standard, metallic, special
+    vehicle_class: Optional[str] = None  # Override auto-detected class (A, B, C, D)
+    body_type: Optional[str] = None  # SUV, sedan, etc. for class detection
 
 
 async def get_labor_hours_from_rag(part_name: str) -> Optional[float]:
@@ -1002,38 +1433,63 @@ def get_hourly_rate(part_name: str, hourly_rate_override: Optional[float],
 @app.post("/parts/search")
 async def search_parts_prices(request: PartsSearchRequest):
     """
-    Search for parts prices across Bulgarian auto parts websites.
+    Search for parts prices with full Naredba 24 compliance.
 
-    Uses web scraping to find real-time prices from:
-    - autopower.bg (OEM and aftermarket)
-    - alo.bg (used parts marketplace)
-    - mobile.bg parts section
-
-    Labor hours are retrieved from Naredba 24 via RAG service.
+    Features:
+    - Web scraping for real-time prices (bazar.bg, alochasti.bg, autoprofi.bg)
+    - Depreciation coefficients by vehicle age and origin (чл. 12)
+    - Vehicle class detection for labor norms (чл. 13)
+    - Structured labor norms from Naredba 24 tables (Глава трета)
+    - Paint cost calculation with materials (Глава четвърта)
 
     Args:
-        request: PartsSearchRequest with make, model, year, parts list
-        - hourly_rate_bgn: Override default hourly rate for all parts
-        - work_type_rates: Override rates by work type (тенекеджийски, бояджийски, etc.)
+        request: PartsSearchRequest with:
+        - make, model, year, parts list
+        - include_depreciation: Apply age/origin coefficient to parts
+        - include_labor: Calculate labor from Naredba 24 tables
+        - include_paint: Calculate paint costs
+        - paint_type: standard, metallic, special
+        - vehicle_class: Override auto-detected A/B/C/D
+        - hourly_rate_bgn: Override labor rate
 
     Returns:
-        Parts breakdown with prices, labor hours (from Naredba 24), and sources
+        Complete repair estimate with Naredba 24 compliance
     """
     make = request.make
     model = request.model
     year = request.year
     parts = request.parts
     include_labor = request.include_labor
+    include_paint = request.include_paint
+    include_depreciation = request.include_depreciation
     hourly_rate_override = request.hourly_rate_bgn
+    paint_hourly_rate = request.paint_hourly_rate_bgn or 60.0
     work_type_rates_override = request.work_type_rates
+    paint_type = request.paint_type
+    body_type = request.body_type
+
+    # Determine vehicle class (Naredba 24 чл. 13)
+    if request.vehicle_class:
+        vehicle_class = request.vehicle_class.upper()
+        vehicle_class_explanation = f"клас {vehicle_class} (ръчно зададен)"
+    else:
+        vehicle_class, vehicle_class_explanation = get_vehicle_class(make, model, body_type)
+
+    # Calculate depreciation coefficient (Naredba 24 чл. 12)
+    depreciation_coefficient, depreciation_explanation = get_depreciation_coefficient(make, model, year)
+
+    # Get vehicle origin
+    vehicle_origin = get_vehicle_origin(make, model)
 
     results = []
-    total_parts_cost = 0
+    total_parts_cost_raw = 0  # Before depreciation
+    total_parts_cost = 0      # After depreciation
     total_labor_cost = 0
+    paintable_parts = []
 
     for part_name in parts:
-        # Check cache first
-        cache_key = f"part:{make.lower()}:{model.lower()}:{year}:{part_name.lower()}"
+        # Check cache first (include depreciation in cache key)
+        cache_key = f"part:v2:{make.lower()}:{model.lower()}:{year}:{part_name.lower()}:{vehicle_class}"
 
         if redis_client:
             try:
@@ -1043,10 +1499,15 @@ async def search_parts_prices(request: PartsSearchRequest):
                     part_result = json.loads(cached)
                     part_result["from_cache"] = True
                     results.append(part_result)
-                    if part_result.get("best_price_bgn"):
+                    if part_result.get("price_after_depreciation_bgn"):
+                        total_parts_cost += part_result["price_after_depreciation_bgn"]
+                    elif part_result.get("best_price_bgn"):
                         total_parts_cost += part_result["best_price_bgn"]
                     if part_result.get("labor_cost_bgn"):
                         total_labor_cost += part_result["labor_cost_bgn"]
+                    # Check if paintable
+                    if is_paintable_part(part_name):
+                        paintable_parts.append(part_name)
                     continue
             except Exception as e:
                 logger.warning(f"Redis read error: {e}")
@@ -1057,7 +1518,7 @@ async def search_parts_prices(request: PartsSearchRequest):
         # Search multiple sources in parallel
         search_results = await search_part_prices(make, model, year, part_name, part_bg)
 
-        # Calculate labor cost using RAG (Naredba 24) + work type rates
+        # Calculate labor cost from Naredba 24 structured tables (faster than RAG)
         labor_cost = 0
         labor_hours = None
         labor_source = None
@@ -1065,19 +1526,20 @@ async def search_parts_prices(request: PartsSearchRequest):
         work_type = None
 
         if include_labor:
-            # Get labor hours from Naredba 24 via RAG
-            labor_hours = await get_labor_hours_from_rag(part_bg)
+            # First try structured table (faster, more reliable)
+            table_result = get_labor_hours_from_table(part_bg, vehicle_class)
 
-            if labor_hours is None:
-                # Try with English name
-                labor_hours = await get_labor_hours_from_rag(part_name)
-
-            if labor_hours is not None:
-                labor_source = "naredba_24"
+            if table_result:
+                labor_hours, labor_source = table_result
             else:
-                # No default - return null if not found in Naredba 24
-                labor_source = None
-                logger.warning(f"Labor hours not found in Naredba 24 for: {part_name} ({part_bg})")
+                # Fallback to RAG for parts not in table
+                labor_hours = await get_labor_hours_from_rag(part_bg)
+                if labor_hours is None:
+                    labor_hours = await get_labor_hours_from_rag(part_name)
+                if labor_hours:
+                    labor_source = "naredba_24_rag"
+                else:
+                    logger.warning(f"Labor hours not found for: {part_name} ({part_bg})")
 
             # Get hourly rate based on work type (only if hours found)
             if labor_hours is not None:
@@ -1085,39 +1547,61 @@ async def search_parts_prices(request: PartsSearchRequest):
                 hourly_rate = get_hourly_rate(part_name, hourly_rate_override, work_type_rates_override)
                 labor_cost = round(labor_hours * hourly_rate, 2)
 
-        part_result = {
-            "part_name": part_name,
-            "part_name_bg": part_bg,
-            "search_results": search_results,
-            "best_price_bgn": None,
-            "best_source": None,
-            "price_range": None,
-            "labor_hours": labor_hours if include_labor else None,
-            "labor_hours_source": labor_source if include_labor else None,
-            "hourly_rate_bgn": hourly_rate if include_labor else None,
-            "work_type": work_type if include_labor else None,
-            "labor_cost_bgn": labor_cost if include_labor else None,
-        }
-
-        # Find best price
+        # Find best price from search results
         all_prices = []
         for source, data in search_results.items():
             if data.get("prices"):
                 all_prices.extend([(p, source) for p in data["prices"]])
 
+        best_price_raw = None
+        best_price_depreciated = None
+        best_source = None
+        price_range = None
+
         if all_prices:
             all_prices.sort(key=lambda x: x[0])
-            part_result["best_price_bgn"] = all_prices[0][0]
-            part_result["best_source"] = all_prices[0][1]
-            part_result["price_range"] = {
+            best_price_raw = all_prices[0][0]
+            best_source = all_prices[0][1]
+            price_range = {
                 "min_bgn": all_prices[0][0],
                 "max_bgn": all_prices[-1][0],
                 "avg_bgn": round(sum(p[0] for p in all_prices) / len(all_prices), 2)
             }
-            total_parts_cost += part_result["best_price_bgn"]
+
+            # Apply depreciation coefficient if enabled
+            if include_depreciation:
+                best_price_depreciated = round(best_price_raw * depreciation_coefficient, 2)
+                total_parts_cost_raw += best_price_raw
+                total_parts_cost += best_price_depreciated
+            else:
+                total_parts_cost_raw += best_price_raw
+                total_parts_cost += best_price_raw
 
         if labor_cost:
             total_labor_cost += labor_cost
+
+        # Check if this part needs painting
+        if is_paintable_part(part_name):
+            paintable_parts.append(part_bg or part_name)
+
+        part_result = {
+            "part_name": part_name,
+            "part_name_bg": part_bg,
+            "search_results": search_results,
+            "best_price_bgn": best_price_raw,
+            "best_source": best_source,
+            "price_range": price_range,
+            # Depreciation
+            "depreciation_coefficient": depreciation_coefficient if include_depreciation else None,
+            "price_after_depreciation_bgn": best_price_depreciated if include_depreciation else None,
+            # Labor
+            "labor_hours": labor_hours if include_labor else None,
+            "labor_hours_source": labor_source if include_labor else None,
+            "hourly_rate_bgn": hourly_rate if include_labor else None,
+            "work_type": work_type if include_labor else None,
+            "labor_cost_bgn": labor_cost if include_labor else None,
+            "vehicle_class": vehicle_class if include_labor else None,
+        }
 
         # Cache result
         if redis_client and part_result.get("best_price_bgn"):
@@ -1128,21 +1612,63 @@ async def search_parts_prices(request: PartsSearchRequest):
 
         results.append(part_result)
 
-    return {
+    # Calculate paint costs if enabled
+    paint_estimate = None
+    total_paint_cost = 0
+
+    if include_paint and paintable_parts:
+        paint_estimate = calculate_paint_cost(
+            paintable_parts,
+            vehicle_class,
+            paint_type,
+            paint_hourly_rate
+        )
+        total_paint_cost = paint_estimate["total_paint_cost_bgn"]
+
+    # Build response with full Naredba 24 compliance data
+    response = {
         "make": make,
         "model": model,
         "year": year,
         "parts": results,
+        # Naredba 24 compliance data
+        "naredba_24": {
+            "vehicle_origin": vehicle_origin,
+            "vehicle_class": vehicle_class,
+            "vehicle_class_explanation": vehicle_class_explanation,
+            "depreciation_coefficient": depreciation_coefficient if include_depreciation else None,
+            "depreciation_explanation": depreciation_explanation if include_depreciation else None,
+        },
+        # Paint estimate (if enabled)
+        "paint_estimate": paint_estimate,
+        # Summary
         "summary": {
-            "total_parts_cost_bgn": round(total_parts_cost, 2),
+            "total_parts_cost_raw_bgn": round(total_parts_cost_raw, 2),
+            "total_parts_cost_bgn": round(total_parts_cost, 2),  # After depreciation
+            "depreciation_savings_bgn": round(total_parts_cost_raw - total_parts_cost, 2) if include_depreciation else 0,
             "total_labor_cost_bgn": round(total_labor_cost, 2),
-            "total_repair_cost_bgn": round(total_parts_cost + total_labor_cost, 2),
+            "total_paint_cost_bgn": round(total_paint_cost, 2) if include_paint else 0,
+            "total_repair_cost_bgn": round(total_parts_cost + total_labor_cost + total_paint_cost, 2),
             "parts_found": sum(1 for r in results if r.get("best_price_bgn")),
             "parts_not_found": sum(1 for r in results if not r.get("best_price_bgn")),
         },
         "currency": "BGN",
-        "note": "Prices are estimates from online sources. Actual prices may vary."
+        "source": "Naredba 24 (чл. 12, 13, Глава III-IV)",
+        "note": "Prices include Naredba 24 depreciation and labor norms. Paint calculated separately."
     }
+
+    return response
+
+
+def is_paintable_part(part_name: str) -> bool:
+    """Check if a part typically needs painting after replacement."""
+    paintable_keywords = {
+        "броня", "bumper", "калник", "fender", "капак", "hood", "bonnet",
+        "врата", "door", "праг", "sill", "таван", "roof", "панел", "panel",
+        "колона", "pillar", "рог", "под", "floor"
+    }
+    part_lower = part_name.lower()
+    return any(kw in part_lower for kw in paintable_keywords)
 
 
 async def search_part_prices(make: str, model: str, year: int, part_en: str, part_bg: str) -> Dict:
@@ -1340,18 +1866,123 @@ async def search_autoprofi_bg(make: str, model: str, year: int, part_bg: str) ->
         return {"error": str(e), "prices": []}
 
 
+@app.get("/naredba24/coefficient/{make}/{year}")
+async def get_naredba24_coefficient(make: str, year: int, model: Optional[str] = None):
+    """
+    Get Naredba 24 depreciation coefficient for a vehicle.
+
+    Returns coefficient based on:
+    - Vehicle origin (Eastern vs Western per чл. 12)
+    - Vehicle age (0-3, 4-7, 8-14, 15+ years)
+    - Special adjustments (Peugeot, Opel, Citroen, Ford)
+    """
+    coefficient, explanation = get_depreciation_coefficient(make, model, year)
+    origin = get_vehicle_origin(make, model)
+    vehicle_class, class_explanation = get_vehicle_class(make, model)
+
+    current_year = datetime.now().year
+    vehicle_age = current_year - year
+
+    return {
+        "make": make,
+        "model": model,
+        "year": year,
+        "vehicle_age": vehicle_age,
+        "vehicle_origin": origin,
+        "vehicle_class": vehicle_class,
+        "vehicle_class_explanation": class_explanation,
+        "depreciation_coefficient": coefficient,
+        "explanation": explanation,
+        "source": "Naredba 24 чл. 12",
+        "example": {
+            "new_part_price_bgn": 1000,
+            "depreciated_price_bgn": round(1000 * coefficient, 2)
+        }
+    }
+
+
+@app.get("/naredba24/labor/{part_name}")
+async def get_naredba24_labor(part_name: str, vehicle_class: str = "B"):
+    """
+    Get Naredba 24 labor norm for a part.
+
+    Returns labor hours from structured tables (Глава трета).
+    """
+    part_bg = translate_part_name(part_name)
+
+    # Try structured table first
+    table_result = get_labor_hours_from_table(part_bg, vehicle_class.upper())
+
+    if table_result:
+        hours, source = table_result
+        return {
+            "part_name": part_name,
+            "part_name_bg": part_bg,
+            "vehicle_class": vehicle_class.upper(),
+            "labor_hours": hours,
+            "source": source,
+            "all_classes": {
+                "A": LABOR_NORMS_REPLACEMENT.get(part_bg, [None])[0],
+                "B": LABOR_NORMS_REPLACEMENT.get(part_bg, [None, None])[1] if len(LABOR_NORMS_REPLACEMENT.get(part_bg, [])) > 1 else None,
+                "C": LABOR_NORMS_REPLACEMENT.get(part_bg, [None, None, None])[2] if len(LABOR_NORMS_REPLACEMENT.get(part_bg, [])) > 2 else None,
+                "D": LABOR_NORMS_REPLACEMENT.get(part_bg, [None, None, None, None])[3] if len(LABOR_NORMS_REPLACEMENT.get(part_bg, [])) > 3 else None,
+            }
+        }
+
+    return {
+        "part_name": part_name,
+        "part_name_bg": part_bg,
+        "vehicle_class": vehicle_class.upper(),
+        "labor_hours": None,
+        "source": None,
+        "error": "Part not found in Naredba 24 tables",
+        "available_parts": list(LABOR_NORMS_REPLACEMENT.keys())[:20]  # Show first 20 available
+    }
+
+
+@app.get("/naredba24/paint")
+async def get_naredba24_paint(parts: str, vehicle_class: str = "B",
+                               paint_type: str = "metallic",
+                               hourly_rate: float = 60.0):
+    """
+    Calculate paint costs per Naredba 24 (Глава четвърта).
+
+    Args:
+        parts: Comma-separated list of parts (e.g., "предна броня,преден калник")
+        vehicle_class: A, B, C, or D
+        paint_type: standard, metallic, or special
+        hourly_rate: Hourly rate for paint work (default 60 BGN)
+    """
+    parts_list = [p.strip() for p in parts.split(",") if p.strip()]
+
+    if not parts_list:
+        raise HTTPException(status_code=400, detail="No parts provided")
+
+    result = calculate_paint_cost(parts_list, vehicle_class.upper(), paint_type, hourly_rate)
+    return result
+
+
 @app.get("/")
 async def root():
     """Root endpoint with service info."""
     return {
         "service": "Car Value Service",
-        "version": "3.3.0",
-        "description": "Bulgarian car market value + VIN decoder + parts pricing",
+        "version": "4.0.0",
+        "description": "Bulgarian car market value + VIN decoder + parts pricing + Naredba 24 compliance",
         "endpoints": {
             "/vin/{vin}": "Decode VIN to get vehicle info",
             "/value/{make}/{model}/{year}": "Get car market value",
             "/value-by-vin/{vin}": "Get car value by VIN",
-            "/parts/search": "Search for parts prices (POST with make, model, year, parts[])"
+            "/parts/search": "Search for parts prices with Naredba 24 compliance (POST)",
+            "/naredba24/coefficient/{make}/{year}": "Get depreciation coefficient (чл. 12)",
+            "/naredba24/labor/{part_name}": "Get labor hours from table (Глава III)",
+            "/naredba24/paint": "Calculate paint costs (Глава IV)",
+        },
+        "naredba_24_features": {
+            "depreciation": "Coefficients by vehicle age and origin (Eastern/Western)",
+            "vehicle_classes": "A (<4m), B (4-4.6m), C (>4.6m), D (SUV/Van)",
+            "labor_norms": "Structured hours per part per class",
+            "paint_calculation": "Labor + materials + color matching + oven drying",
         }
     }
 
