@@ -111,6 +111,13 @@ Important instructions:
 18. CRITICAL: Each vehicle has its own registration number - extract EACH vehicle's registration separately
 19. Look for vehicle data in separate sections/blocks - match VIN, registration, make, model, year to the correct vehicle
 20. If a vehicle is missing data, use null - do NOT copy data from another vehicle
+21. CRITICAL FOR DAMAGES: In Bulgarian protocols, vehicle A (МПС А) and vehicle B (МПС Б) have SEPARATE damage sections
+    - Look for "ВИДИМИ ЩЕТИ" or "ПОВРЕДИ" under EACH vehicle's section
+    - Vehicle A's damages are listed ONLY under "ПРЕВОЗНО СРЕДСТВО А" section
+    - Vehicle B's damages are listed ONLY under "ПРЕВОЗНО СРЕДСТВО Б" section
+    - DO NOT mix or swap damages between vehicles!
+    - If vehicle A hit vehicle B, A's damage is typically FRONT, B's damage is typically REAR/SIDE
+22. In lane-change accidents: the vehicle changing lanes (at fault) hits with its FRONT, victim is hit on SIDE/REAR
 
 JSON Response:"""
 
