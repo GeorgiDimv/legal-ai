@@ -345,6 +345,7 @@ def extract_vins_from_text(text: str) -> list[str]:
     """
     Extract VINs from raw text using regex.
     VINs are exactly 17 characters, excluding I, O, Q.
+    Returns VINs in order of appearance in the document.
     """
     if not text:
         return []
@@ -360,7 +361,7 @@ def extract_vins_from_text(text: str) -> list[str]:
     standalone_pattern = re.compile(r'\b([A-HJ-NPR-Z0-9]{17})\b')
     all_matches = standalone_pattern.findall(text.upper())
 
-    # Combine and dedupe
+    # Combine and dedupe while preserving order
     vins = list(dict.fromkeys([m.upper() for m in matches] + all_matches))
 
     # Filter out obvious non-VINs (all digits, all letters)
@@ -372,6 +373,67 @@ def extract_vins_from_text(text: str) -> list[str]:
             valid_vins.append(vin)
 
     return valid_vins
+
+
+def extract_registrations_from_text(text: str) -> list[str]:
+    """
+    Extract Bulgarian vehicle registration numbers from text.
+    Format: 2 letters + space + 4 digits + space + 2 letters (e.g., СА 4521 КМ)
+    """
+    if not text:
+        return []
+
+    # Bulgarian registration pattern: 2 Cyrillic letters, 4 digits, 2 Cyrillic letters
+    # Also handles Latin letters (common in OCR)
+    reg_pattern = re.compile(
+        r'[АВЕКМНОРСТУХ]{1,2}\s*\d{4}\s*[АВЕКМНОРСТУХ]{2}|'  # Cyrillic
+        r'[ABEKMHOPCTYX]{1,2}\s*\d{4}\s*[ABEKMHOPCTYX]{2}',  # Latin transliteration
+        re.IGNORECASE
+    )
+    matches = reg_pattern.findall(text)
+
+    # Normalize: add spaces between parts
+    normalized = []
+    for m in matches:
+        # Remove extra spaces and normalize
+        clean = re.sub(r'\s+', '', m.upper())
+        if len(clean) >= 7:  # At least 1 letter + 4 digits + 2 letters
+            # Insert spaces: XX 1234 XX
+            letters1 = clean[:2] if clean[1].isalpha() else clean[:1]
+            rest = clean[len(letters1):]
+            digits = rest[:4]
+            letters2 = rest[4:6]
+            formatted = f"{letters1} {digits} {letters2}"
+            if formatted not in normalized:
+                normalized.append(formatted)
+
+    return normalized
+
+
+def extract_year_from_text(text: str) -> list[int]:
+    """
+    Extract vehicle years from text.
+    Looks for years between 1990 and 2030 near vehicle-related keywords.
+    """
+    if not text:
+        return []
+
+    # Look for years near "година" (year) or standalone 4-digit years
+    year_pattern = re.compile(
+        r'(?:Година|година|Year|year)[:\s]*(\d{4})|'
+        r'\b(19[9][0-9]|20[0-2][0-9]|2030)\b'
+    )
+    matches = year_pattern.findall(text)
+
+    years = []
+    for m in matches:
+        year_str = m[0] or m[1]  # Either group can match
+        if year_str:
+            year = int(year_str)
+            if 1990 <= year <= 2030 and year not in years:
+                years.append(year)
+
+    return years
 
 
 def extract_damaged_parts_from_text(text: str) -> list[str]:
@@ -444,25 +506,71 @@ def enrich_extraction_with_fallback(data: dict, raw_text: str) -> tuple[dict, li
     """
     Enrich LLM extraction with regex-based fallbacks for commonly missed fields.
     Runs after validate_extraction to fill in gaps.
+    Also fixes duplicate VINs, registrations, and years.
 
     Returns:
         Tuple of (enriched_data, info_messages)
     """
     info = []
 
-    # Extract VINs from raw text
+    # Extract all VINs, registrations, and years from raw text
     text_vins = extract_vins_from_text(raw_text)
+    text_regs = extract_registrations_from_text(raw_text)
+    text_years = extract_year_from_text(raw_text)
 
-    # Check each vehicle for missing VIN
+    logger.info(f"Fallback extraction found: VINs={text_vins}, regs={text_regs}, years={text_years}")
+
     vehicles = data.get("vehicles", [])
+
+    # Step 1: Detect and fix duplicate VINs
+    if len(vehicles) >= 2 and len(text_vins) >= 2:
+        vins_in_vehicles = [v.get("vin") for v in vehicles]
+        # Check if all vehicles have the same VIN (duplicate bug)
+        unique_vins = set(v for v in vins_in_vehicles if v)
+        if len(unique_vins) == 1 and len(vehicles) > 1:
+            # All vehicles have same VIN - this is wrong! Reassign from text_vins
+            info.append(f"Detected duplicate VIN {unique_vins.pop()} - reassigning from text")
+            for i, v in enumerate(vehicles):
+                if i < len(text_vins):
+                    old_vin = v.get("vin")
+                    v["vin"] = text_vins[i]
+                    info.append(f"Vehicle {i}: VIN {old_vin} -> {text_vins[i]}")
+
+    # Step 2: Fill in missing VINs
     vin_index = 0
     for v in vehicles:
         if not v.get("vin") and vin_index < len(text_vins):
             v["vin"] = text_vins[vin_index]
-            info.append(f"Fallback: extracted VIN {text_vins[vin_index]} from text")
+            info.append(f"Fallback: extracted VIN {text_vins[vin_index]} for vehicle")
             vin_index += 1
 
-    # Extract damaged parts if missing
+    # Step 3: Detect and fix duplicate/missing registrations
+    if len(vehicles) >= 2 and len(text_regs) >= 2:
+        regs_in_vehicles = [v.get("registration") for v in vehicles]
+        unique_regs = set(r for r in regs_in_vehicles if r)
+        # Fix if duplicate or if some are missing
+        if len(unique_regs) < len(vehicles):
+            for i, v in enumerate(vehicles):
+                if i < len(text_regs):
+                    if not v.get("registration") or v.get("registration") == regs_in_vehicles[0]:
+                        old_reg = v.get("registration")
+                        v["registration"] = text_regs[i]
+                        if old_reg != text_regs[i]:
+                            info.append(f"Vehicle {i}: registration {old_reg} -> {text_regs[i]}")
+
+    # Step 4: Fill in missing registrations
+    for i, v in enumerate(vehicles):
+        if not v.get("registration") and i < len(text_regs):
+            v["registration"] = text_regs[i]
+            info.append(f"Fallback: extracted registration {text_regs[i]} for vehicle {i}")
+
+    # Step 5: Fill in missing years
+    for i, v in enumerate(vehicles):
+        if not v.get("year") and i < len(text_years):
+            v["year"] = text_years[i]
+            info.append(f"Fallback: extracted year {text_years[i]} for vehicle {i}")
+
+    # Step 6: Extract damaged parts if missing
     for v in vehicles:
         if not v.get("damaged_parts") or len(v.get("damaged_parts", [])) == 0:
             # Try to extract from vehicle's damage_description first
