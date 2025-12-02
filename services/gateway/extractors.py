@@ -412,25 +412,39 @@ def extract_registrations_from_text(text: str) -> list[str]:
 
 def extract_year_from_text(text: str) -> list[int]:
     """
-    Extract vehicle years from text.
-    Looks for years between 1990 and 2030 near vehicle-related keywords.
+    Extract vehicle manufacture years from text.
+    Specifically looks for "Година:" (Year:) labels to find vehicle years.
+    Filters out document dates, policy expiry dates, and future years.
     """
     if not text:
         return []
 
-    # Look for years near "година" (year) or standalone 4-digit years
-    year_pattern = re.compile(
-        r'(?:Година|година|Year|year)[:\s]*(\d{4})|'
-        r'\b(19[9][0-9]|20[0-2][0-9]|2030)\b'
+    # Current year - vehicles can't be newer than current year
+    import datetime
+    current_year = datetime.datetime.now().year
+
+    # First priority: Look for years specifically labeled as "Година:" (vehicle year)
+    vehicle_year_pattern = re.compile(
+        r'(?:Година|година)[:\s]*(\d{4})',
+        re.IGNORECASE
     )
-    matches = year_pattern.findall(text)
+    labeled_years = vehicle_year_pattern.findall(text)
 
     years = []
-    for m in matches:
-        year_str = m[0] or m[1]  # Either group can match
-        if year_str:
+    for year_str in labeled_years:
+        year = int(year_str)
+        # Vehicle years should be: not in the future, not more than 35 years old
+        if 1990 <= year <= current_year and year not in years:
+            years.append(year)
+
+    # If no labeled years found, try standalone years but filter aggressively
+    if not years:
+        standalone_pattern = re.compile(r'\b(19[9][0-9]|20[0-2][0-5])\b')
+        all_matches = standalone_pattern.findall(text)
+        for year_str in all_matches:
             year = int(year_str)
-            if 1990 <= year <= 2030 and year not in years:
+            # Only include if it looks like a reasonable vehicle year
+            if 1990 <= year <= current_year and year not in years:
                 years.append(year)
 
     return years
