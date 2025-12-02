@@ -879,6 +879,12 @@ async def get_labor_hours_from_rag(part_name: str) -> Optional[float]:
                 f"{base_name} възстановяване сложност часове",  # Restoration section
                 f"{part_name}—смяна",  # Exact format from Naredba
                 f"{base_name} 1 2 3 часове група",  # Table format
+                # Broader queries for finding parts in tables
+                f"преден {base_name} болтове часове",  # "преден калник на болтове"
+                f"заден {base_name} болтове часове",
+                f"{base_name} на купе часове",  # "таван на купе"
+                f"подмяна нови детайли леки автомобили {base_name}",  # Full table query
+                f"раздел подмяна {base_name}",
             ]
 
             for query in queries:
@@ -918,6 +924,12 @@ async def get_labor_hours_from_rag(part_name: str) -> Optional[float]:
                             rf'{re.escape(search_term)}\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
                             # With complexity: "119. Врата 1 1,9 2,0"
                             rf'\d+\.\s*{re.escape(search_term)}\s+\d\s+([\d,.\s]+)',
+                            # Compound name: "5. Преден калник на болтове 2,8 3 3,5 4"
+                            rf'\d+\.\s*[а-яА-Я]+\s+{re.escape(search_term)}[^0-9]*?([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
+                            # With "на" suffix: "18. Таван на купе 12 17 19 21"
+                            rf'\d+\.\s*{re.escape(search_term)}\s+на\s+[а-яА-Я]+\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
+                            # Any word before part: "Преден калник" or "Задна броня"
+                            rf'\d+\.\s*(?:[а-яА-Я]+\s+)?{re.escape(search_term)}(?:\s+(?:на\s+)?[а-яА-Я]+)?\s+([\d,.\s]+?)(?:\d+\.|[А-Яа-я]{{3,}}|$)',
                         ]
 
                         for pattern in patterns:
