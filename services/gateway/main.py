@@ -453,7 +453,7 @@ async def search_parts_prices(make: str, model: str, year: int, parts: list) -> 
                     "model": model,
                     "year": year,
                     "parts": parts,
-                    "include_labor": True
+                    "include_labor": False  # Labor norms from gateway dual-query RAG instead
                 }
             )
 
