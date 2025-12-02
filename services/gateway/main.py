@@ -1149,8 +1149,8 @@ async def generate_ate_report(request: ATEReportRequest):
 
             # Get relevant ATE knowledge from RAG
             # Add keywords to help match both uchebnik (methodology) and naredba (damage/insurance)
-            rag_query = f"автотехническа експертиза методика обезщетение вреди застраховка МПС\n{raw_text}"
-            rag_context = await get_ate_context(rag_query, limit=8)
+            rag_query = f"автотехническа експертиза методика обезщетение вреди застраховка МПС\n{raw_text[:2000]}"
+            rag_context = await get_ate_context(rag_query, limit=5)  # Reduced from 8 to fit context
             ate_knowledge = rag_context.get("context", "")
             sources = rag_context.get("sources", [])
 
@@ -1194,6 +1194,17 @@ async def generate_ate_report(request: ATEReportRequest):
 {{"report_text": "[ТУК НАПИШЕТЕ ЦЕЛИЯ ДОКЛАД - ЗАГЛАВИЕ, ВЪВЕДЕНИЕ, ИЗСЛЕДВАНЕ, ИЗВОДИ, ОТГОВОРИ]", "sections": {{}}}}
 """
 
+            # Estimate input tokens (rough: 1 token ≈ 4 chars for Cyrillic)
+            prompt_chars = len(report_prompt) + 150  # +150 for system prompt
+            estimated_input_tokens = prompt_chars // 3  # Conservative estimate for Cyrillic
+
+            # Calculate max_tokens to stay within 16k context
+            max_context = 16384
+            available_tokens = max_context - estimated_input_tokens - 100  # 100 token buffer
+            max_output_tokens = min(5000, max(1000, available_tokens))  # Between 1000-5000
+
+            logger.info(f"Report generation: ~{estimated_input_tokens} input tokens, {max_output_tokens} max output")
+
             response = await llm_client.chat.completions.create(
                 model=LLM_MODEL,
                 messages=[
@@ -1201,7 +1212,7 @@ async def generate_ate_report(request: ATEReportRequest):
                     {"role": "user", "content": report_prompt}
                 ],
                 temperature=0.3,
-                max_tokens=5000,  # Reduced to fit 16k context with enriched input
+                max_tokens=max_output_tokens,
                 response_format={"type": "json_object"}
             )
 
