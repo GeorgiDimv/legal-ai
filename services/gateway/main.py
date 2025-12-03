@@ -663,7 +663,12 @@ async def get_ate_context(query: str, limit: int = 5, document_filter: str = Non
 
 async def get_dual_ate_context(query: str, damaged_parts: list[str] = None) -> tuple[str, list[str]]:
     """
-    Retrieve ATE knowledge from BOTH sources with separate queries.
+    Retrieve ATE knowledge from THREE sources with separate queries.
+
+    Sources:
+    - naredba_24: Legal requirements and regulations
+    - uchebnik_ate: Technical methodology and formulas
+    - court_expertise: Real court case examples (professional phrasing)
 
     Returns tuple of:
     - Formatted context with clearly labeled sections
@@ -677,9 +682,9 @@ async def get_dual_ate_context(query: str, damaged_parts: list[str] = None) -> t
     uchebnik_query = f"методика скорост формула удар ПТП {query[:500]}"
     uchebnik_context = await get_ate_context(uchebnik_query, limit=3, document_filter="uchebnik_ate")
 
-    # Skip labor_context RAG - we now have structured labor norms in car_value service v4.0.0
-    # This saves ~1500 tokens for report output
-    labor_context = None
+    # Query for real court expertise examples (professional phrasing and structure)
+    court_query = f"експертиза механизъм скорост изводи {query[:300]}"
+    court_context = await get_ate_context(court_query, limit=2, document_filter="court_expertise")
 
     # Combine with clear labels
     combined_parts = []
@@ -690,15 +695,15 @@ async def get_dual_ate_context(query: str, damaged_parts: list[str] = None) -> t
         all_sources.extend(naredba_context.get("sources", []))
         logger.info(f"Retrieved {naredba_context.get('count', 0)} Naredba 24 legal chunks")
 
-    if labor_context and labor_context.get("context"):
-        combined_parts.append(f"═══ НАРЕДБА 24 (Нормативи за ремонт - часове) ═══\n{labor_context['context']}")
-        all_sources.extend(labor_context.get("sources", []))
-        logger.info(f"Retrieved {labor_context.get('count', 0)} Naredba 24 labor chunks")
-
     if uchebnik_context.get("context"):
         combined_parts.append(f"═══ УЧЕБНИК АТЕ (Техническа методология) ═══\n{uchebnik_context['context']}")
         all_sources.extend(uchebnik_context.get("sources", []))
         logger.info(f"Retrieved {uchebnik_context.get('count', 0)} Uchebnik chunks")
+
+    if court_context.get("context"):
+        combined_parts.append(f"═══ СЪДЕБНА ЕКСПЕРТИЗА (Примери от реални дела) ═══\n{court_context['context']}")
+        all_sources.extend(court_context.get("sources", []))
+        logger.info(f"Retrieved {court_context.get('count', 0)} Court expertise chunks")
 
     context = "\n\n".join(combined_parts) if combined_parts else ""
     return context, all_sources

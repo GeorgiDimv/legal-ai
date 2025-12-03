@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class DocumentChunk:
     """Represents a chunk of a document with metadata."""
     text: str
-    document: str  # "naredba_24" or "uchebnik_ate"
+    document: str  # "naredba_24", "uchebnik_ate", or "court_expertise"
     section: str
     article: Optional[str]
     page: int
@@ -54,13 +54,31 @@ def extract_text_from_pdf(pdf_path: str) -> List[Dict[str, Any]]:
 
 
 def detect_document_type(filename: str, text_sample: str) -> str:
-    """Detect if document is Naredba 24 or ATE textbook."""
+    """Detect document type: Naredba 24, ATE textbook, or court expertise."""
     filename_lower = filename.lower()
+    text_lower = text_sample.lower()[:2000]
 
-    if "naredba" in filename_lower or "наредба" in text_sample.lower()[:1000]:
+    # Check for Naredba 24 (legal regulation)
+    if "naredba" in filename_lower or "наредба" in text_lower:
         return "naredba_24"
-    elif "uchebnik" in filename_lower or "учебник" in text_sample.lower()[:1000]:
+
+    # Check for ATE textbook
+    elif "uchebnik" in filename_lower or "учебник" in text_lower:
         return "uchebnik_ate"
+
+    # Check for court expertise (real case files)
+    # Patterns: "s-v" (court case number), "PTP/ПТП" (traffic accident), date patterns like "04.04.2025"
+    elif (
+        "s-v" in filename_lower or
+        "ptp" in filename_lower or
+        "експертиза" in text_lower or
+        "съдебно" in text_lower or
+        re.search(r'\d{2}\.\d{2}\.\d{4}.*s-v', filename_lower) or
+        "районен съд" in text_lower or
+        "окръжен съд" in text_lower
+    ):
+        return "court_expertise"
+
     else:
         # Default based on content patterns
         if re.search(r'чл\.\s*\d+', text_sample[:5000], re.IGNORECASE):
