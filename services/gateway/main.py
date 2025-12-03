@@ -1097,20 +1097,37 @@ async def enrich_with_physics(case_data: dict) -> dict:
         # Check if we have the required data (mass is required, others have defaults)
         if v1.get("mass_kg") and v2.get("mass_kg"):
             try:
+                # Determine angles based on collision type
+                # Angles: α (alpha) = pre-impact direction, β (beta) = post-impact direction
+                # 0° = East, 90° = North, 180° = West, 270° = South
+                collision_type = collision_details.get("collision_type", "head_on")
+                default_angles = {
+                    "head_on": {"a_alpha": 0, "a_beta": 180, "b_alpha": 180, "b_beta": 0},
+                    "rear_end": {"a_alpha": 0, "a_beta": 0, "b_alpha": 0, "b_beta": 0},
+                    "side_impact": {"a_alpha": 0, "a_beta": 45, "b_alpha": 0, "b_beta": 315},
+                    "angle": {"a_alpha": 0, "a_beta": 45, "b_alpha": 135, "b_beta": 180},
+                    # left_turn: Vehicle A going straight East (0°), Vehicle B turning left across A's path
+                    # At impact moment, B is perpendicular to A (coming from South = 270°)
+                    "left_turn": {"a_alpha": 0, "a_beta": 0, "b_alpha": 270, "b_beta": 315},
+                    "right_turn": {"a_alpha": 0, "a_beta": 10, "b_alpha": 270, "b_beta": 315},
+                    "perpendicular": {"a_alpha": 0, "a_beta": 45, "b_alpha": 270, "b_beta": 315}
+                }
+                angles = default_angles.get(collision_type, default_angles["head_on"])
+                logger.info(f"Physics: collision_type={collision_type}, A_angles=({angles['a_alpha']},{angles['a_beta']}), B_angles=({angles['b_alpha']},{angles['b_beta']})")
+
                 # Build vehicle dicts matching VehiclePhysics schema
-                # Use 'or' to handle explicit None values from JSON
                 vehicle_a = {
                     "mass_kg": v1["mass_kg"],
                     "post_impact_travel_m": v1.get("post_impact_travel_m") or 5.0,
-                    "alpha_deg": v1.get("pre_impact_angle_deg") or 0,
-                    "beta_deg": v1.get("post_impact_angle_deg") or 0,
+                    "alpha_deg": angles["a_alpha"],
+                    "beta_deg": angles["a_beta"],
                     "final_velocity_ms": 0
                 }
                 vehicle_b = {
                     "mass_kg": v2["mass_kg"],
                     "post_impact_travel_m": v2.get("post_impact_travel_m") or 5.0,
-                    "alpha_deg": v2.get("pre_impact_angle_deg") or 180,
-                    "beta_deg": v2.get("post_impact_angle_deg") or 180,
+                    "alpha_deg": angles["b_alpha"],
+                    "beta_deg": angles["b_beta"],
                     "final_velocity_ms": 0
                 }
                 # Get physics parameters from collision_details with safe defaults
