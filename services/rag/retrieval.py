@@ -128,7 +128,7 @@ class QdrantRetriever:
         limit: int = 5,
         document_filter: Optional[str] = None,
         chunk_type_filter: Optional[List[str]] = None,
-        score_threshold: float = 0.5
+        score_threshold: float = 0.4
     ) -> List[Dict[str, Any]]:
         """
         Search for relevant chunks.
