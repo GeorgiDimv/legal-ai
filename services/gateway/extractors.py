@@ -80,7 +80,7 @@ Extract the following information and return as valid JSON:
     "reasoning": "explanation of settlement calculation"
   }},
   "collision_details": {{
-    "collision_type": "head_on|rear_end|side_impact|angle or null",
+    "collision_type": "head_on|rear_end|side_impact|angle|left_turn|right_turn|perpendicular or null",
     "road_surface": "dry_asphalt|wet_asphalt|gravel|snow|ice or null",
     "road_grade_percent": float road incline percentage or 0,
     "impact_angle_deg": float angle of impact impulse (αs) 0-360 degrees or null,
@@ -135,6 +135,13 @@ Important instructions:
     - "След удара се премества/отмества" = post-impact travel distance
     - "коефициент на сцепление" or "μ" = friction coefficient
     - "Маса" or "тегло" = mass in kg
+26. CRITICAL FOR COLLISION TYPE - determine from description:
+    - "завиващ наляво" or "ляв завой" or "предприема завой наляво" → collision_type: "left_turn"
+    - "завиващ надясно" or "десен завой" → collision_type: "right_turn"
+    - "челен удар" or "насрещна лента" → collision_type: "head_on"
+    - "удар отзад" or "настига" → collision_type: "rear_end"
+    - "смяна на лента" or "изпреварва" → collision_type: "side_impact"
+    - "кръстовище" with perpendicular paths → collision_type: "perpendicular"
 
 JSON Response:"""
 

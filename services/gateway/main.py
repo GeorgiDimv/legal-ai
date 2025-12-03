@@ -911,7 +911,15 @@ async def process_extraction_result(
                 "rear_end": {"a_alpha": 0, "a_beta": 0, "b_alpha": 0, "b_beta": 0},
                 # side_impact: lane-change sideswipe - both traveling same direction, small deflection
                 "side_impact": {"a_alpha": 0, "a_beta": 45, "b_alpha": 0, "b_beta": 315},
-                "angle": {"a_alpha": 0, "a_beta": 45, "b_alpha": 135, "b_beta": 180}
+                "angle": {"a_alpha": 0, "a_beta": 45, "b_alpha": 135, "b_beta": 180},
+                # left_turn: Vehicle A going straight (0°), Vehicle B turning left across A's path
+                # B approaches from opposite direction (180°) and turns left, gets hit on side
+                # After impact: A deflects slightly right (350°), B pushed sideways (315°)
+                "left_turn": {"a_alpha": 0, "a_beta": 350, "b_alpha": 180, "b_beta": 315},
+                # right_turn: Vehicle A going straight, Vehicle B turning right into A's path
+                "right_turn": {"a_alpha": 0, "a_beta": 10, "b_alpha": 270, "b_beta": 315},
+                # perpendicular: T-bone at intersection, A going east, B going north
+                "perpendicular": {"a_alpha": 0, "a_beta": 45, "b_alpha": 270, "b_beta": 315}
             }
             defaults = default_angles.get(collision_type, default_angles["head_on"])
 
