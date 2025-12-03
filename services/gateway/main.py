@@ -11,6 +11,7 @@ Single /process endpoint that orchestrates:
 """
 
 import os
+import re
 import json
 import time
 import logging
@@ -1476,8 +1477,10 @@ async def generate_ate_report(request: ATEReportRequest):
             if not content:
                 raise HTTPException(status_code=500, detail="LLM returned empty response")
 
-            # Plain text response - no JSON parsing needed
+            # Plain text response - clean up Qwen's think tags
             report_text = content.strip()
+            # Remove <think>...</think> tags that Qwen sometimes adds despite /no_think
+            report_text = re.sub(r'<think>[\s\S]*?</think>\s*', '', report_text)
 
             processing_time = time.time() - start_time
 
