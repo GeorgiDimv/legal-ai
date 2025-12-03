@@ -662,7 +662,13 @@ async def get_ate_context(query: str, limit: int = 5, document_filter: str = Non
     return {"context": "", "sources": [], "count": 0}
 
 
-async def get_dual_ate_context(query: str, damaged_parts: list[str] = None) -> tuple[str, list[str]]:
+async def get_dual_ate_context(
+    query: str,
+    damaged_parts: list[str] = None,
+    naredba_limit: int = 3,
+    uchebnik_limit: int = 3,
+    court_limit: int = 2
+) -> tuple[str, list[str]]:
     """
     Retrieve ATE knowledge from THREE sources with separate queries.
 
@@ -677,15 +683,15 @@ async def get_dual_ate_context(query: str, damaged_parts: list[str] = None) -> t
     """
     # Query for legal requirements from Naredba 24
     naredba_query = "наредба 24 изисквания автотехническа експертиза структура доклад чл."
-    naredba_context = await get_ate_context(naredba_query, limit=3, document_filter="naredba_24")
+    naredba_context = await get_ate_context(naredba_query, limit=naredba_limit, document_filter="naredba_24")
 
     # Query for technical methodology from Uchebnik
     uchebnik_query = f"методика скорост формула удар ПТП {query[:500]}"
-    uchebnik_context = await get_ate_context(uchebnik_query, limit=3, document_filter="uchebnik_ate")
+    uchebnik_context = await get_ate_context(uchebnik_query, limit=uchebnik_limit, document_filter="uchebnik_ate")
 
     # Query for real court expertise examples (professional phrasing and structure)
     court_query = f"експертиза механизъм скорост изводи {query[:300]}"
-    court_context = await get_ate_context(court_query, limit=2, document_filter="court_expertise")
+    court_context = await get_ate_context(court_query, limit=court_limit, document_filter="court_expertise")
 
     # Combine with clear labels
     combined_parts = []
@@ -1152,6 +1158,206 @@ async def enrich_with_physics(case_data: dict) -> dict:
     return case_data
 
 
+# ============== Two-Stage ATE Report Generation ==============
+# Stage 1: Sections 1-4 + Formulas 5.1-5.8 (physics analysis)
+# Stage 2: Formulas 5.9-5.15 + Sections 6-9 (conclusions & answers)
+# Each stage uses ~4k input tokens, ~10k output tokens (1/4 : 3/4 ratio)
+
+
+def build_stage1_prompt(
+    report_data_json: str,
+    ate_knowledge: str,
+    physics_values: dict,
+    hourly_rate: float
+) -> str:
+    """Build compact prompt for Stage 1: Sections 1-4 + Formulas 5.1-5.8."""
+    speed_a = physics_values.get("speed_a", "неизвестна")
+    speed_b = physics_values.get("speed_b", "неизвестна")
+    delta_v = physics_values.get("delta_v", "неизвестна")
+    method = physics_values.get("method", "Momentum 360")
+
+    return f"""/no_think
+Генерирайте ЕТАП 1 от Автотехническа Експертиза (АТЕ).
+
+ФОРМАТ: Прост текст с Unicode (√ × ² ³). БЕЗ LaTeX/$$!
+
+══ ИЗЧИСЛЕНИ СТОЙНОСТИ (задължително използвайте) ══
+• МПС А преди удара: V₁ = {speed_a} km/h
+• МПС Б преди удара: V₂ = {speed_b} km/h
+• Delta-V: ΔV = {delta_v} km/h
+• Метод: {method}
+• Коефициент триене: μ = 0.7 (сух асфалт)
+• g = 9.81 m/s²
+
+══ ДАННИ ══
+{report_data_json}
+
+══ РЕФЕРЕНЦИИ ══
+{ate_knowledge}
+
+══ СТРУКТУРА ЕТАП 1 (секции 1-4 + формули 5.1-5.8) ══
+
+1. ЗАГЛАВНА ЧАСТ (10 реда)
+   - "АВТОТЕХНИЧЕСКА ЕКСПЕРТИЗА"
+   - Номер дело, дата, възложител
+
+2. ВЪВЕДЕНИЕ (25 реда)
+   - Основание за назначаване, задачи на експерта
+   - Нормативна база: Наредба 24, ЗДвП
+   - Методи: Momentum 360, запазване на импулса
+
+3. ИЗСЛЕДВАНА ДОКУМЕНТАЦИЯ (20 реда)
+   - Списък документи: протокол, декларации, снимки
+
+4. ФАКТИЧЕСКА ОБСТАНОВКА (60 реда)
+   - Дата, час, място на ПТП
+   - Описание на пътя: широчина, настилка, знаци
+   - Метеоусловия: осветление, видимост
+   - За ВСЯКО МПС: марка, модел, год., рег.№, VIN, маса, направление
+   - Хронология на събитията
+
+5. ТЕХНИЧЕСКО ИЗСЛЕДВАНЕ - ЧАСТ 1 (100 реда)
+
+   5.1 КОЕФИЦИЕНТ НА ТРИЕНЕ (μ):
+   - Стойност μ = 0.7 (сух асфалт), обосновка
+   - Формула: F = μ × m × g
+
+   5.2 СКОРОСТ СЛЕД УДАРА (от следи):
+   - u = √(2×μ×g×σ) - покажете изчисление стъпка по стъпка
+   - Резултат за всяко МПС в m/s и km/h
+
+   5.3 ВЕКТОРНО РАЗЛАГАНЕ:
+   - Vx = V×cos(α), Vy = V×sin(α)
+   - V = √(Vx² + Vy²)
+
+   5.4 MOMENTUM 360 АНАЛИЗ:
+   - X: m₁V₁cos(α₁) + m₂V₂cos(α₂) = m₁u₁cos(β₁) + m₂u₂cos(β₂)
+   - Y: m₁V₁sin(α₁) + m₂V₂sin(α₂) = m₁u₁sin(β₁) + m₂u₂sin(β₂)
+   - Входни данни и изчислени V₁, V₂
+
+   5.5 МАТРИЧЕН МЕТОД (Impact Theory):
+   - [a₁₁ a₁₂; a₂₁ a₂₂] × [V₁; V₂] = [b₁; b₂]
+   - Коефициенти и решение
+
+   5.6 DELTA-V АНАЛИЗ:
+   - ΔV = √(V² + u² - 2Vu×cos(β-α))
+   - ΔV за МПС А и Б, оценка тежест удар
+
+   5.7 ОПАСНА ЗОНА И СПИРАЧЕН ПЪТ:
+   - Sоз = V×(tr + tsp + 0.5tn) + V²/(2j)
+   - tr=1.0s, tsp=0.2s, tn=0.3s, j=μg
+   - Разстояние реакция + спирачен път
+
+   5.8 ВРЕМЕ ЗА СПИРАНЕ:
+   - Tу = tr + tsp + 0.5tn + V/j
+   - Изчисление с реални стойности
+
+Пишете ПОДРОБНО с числа и единици. Това е ЕТАП 1 - продължава в ЕТАП 2.
+"""
+
+
+def build_stage2_prompt(
+    report_data_json: str,
+    ate_knowledge: str,
+    physics_values: dict,
+    expert_questions: list[str],
+    hourly_rate: float,
+    stage1_summary: str
+) -> str:
+    """Build compact prompt for Stage 2: Formulas 5.9-5.15 + Sections 6-9."""
+    speed_a = physics_values.get("speed_a", "неизвестна")
+    speed_b = physics_values.get("speed_b", "неизвестна")
+    delta_v = physics_values.get("delta_v", "неизвестна")
+
+    questions_text = chr(10).join(f'{i+1}. {q}' for i, q in enumerate(expert_questions))
+
+    return f"""/no_think
+Генерирайте ЕТАП 2 от Автотехническа Експертиза (АТЕ).
+
+ФОРМАТ: Прост текст с Unicode (√ × ² ³). БЕЗ LaTeX/$$!
+
+══ РЕЗЮМЕ ОТ ЕТАП 1 ══
+{stage1_summary}
+
+══ ИЗЧИСЛЕНИ СТОЙНОСТИ ══
+• V₁ = {speed_a} km/h, V₂ = {speed_b} km/h, ΔV = {delta_v} km/h
+• μ = 0.7, g = 9.81 m/s²
+
+══ ДАННИ ЗА ЩЕТИ ══
+{report_data_json}
+
+══ РЕФЕРЕНЦИИ ══
+{ate_knowledge}
+
+══ ВЪПРОСИ ЗА ОТГОВОР ══
+{questions_text}
+
+══ СТРУКТУРА ЕТАП 2 (формули 5.9-5.15 + секции 6-9) ══
+
+5. ТЕХНИЧЕСКО ИЗСЛЕДВАНЕ - ЧАСТ 2 (продължение)
+
+   5.9 БЕЗОПАСНА СКОРОСТ (Vбезоп):
+   - Квадратно уравнение за V при което водачът би спрял
+   - Сравнение с действителната скорост
+
+   5.10 ВЪЗМОЖНОСТ ЗА ПРЕДОТВРАТЯВАНЕ:
+   - Sоз vs разстояние до обекта
+   - Ако Sоз > разстояние → НЕ е имал възможност
+   - Времеви анализ
+
+   5.11 АНАЛИЗ НА ЧУВСТВИТЕЛНОСТ:
+   - При μ = 0.65: V = ?
+   - При μ = 0.70: V = ?
+   - При μ = 0.75: V = ?
+   - Грешка: ±5%
+
+   5.12 КОЕФИЦИЕНТ НА ВЪЗСТАНОВЯВАНЕ (k):
+   - k = (u₂ - u₁)/(V₁ - V₂)
+   - Таблица: 12-16 km/h→k=0.24, 23-25→0.16, 40-41→0.13, 55-57→0.12
+   - Използвана стойност
+
+   5.13 ЕНЕРГИЕН БАЛАНС:
+   - E₁ = ½mV² (преди) за всяко МПС
+   - E₂ = ½mu² (след) за всяко МПС
+   - Обща енергия преди и след
+
+   5.14 ДИСИПИРАНА ЕНЕРГИЯ:
+   - ΔE = E₁ - E₂
+   - Процент загуба: (ΔE/E₁)×100%
+   - Енергия за деформация
+
+   5.15 РАБОТА НА СПИРАЧНИ СИЛИ:
+   - W = μ×m×g×s
+   - Изчисление за всяко МПС
+   - Проверка: W ≈ ½mu²
+
+6. ОЦЕНКА НА ЩЕТИТЕ (40 реда) - по Наредба 24
+   За ВСЯКО МПС:
+   - Списък повредени части
+   - Стойност части (от данните)
+   - Коефициент овехтяване по възраст
+   - Труд: часове × {hourly_rate} лв/час
+   - Боядисване
+   - ОБЩА СТОЙНОСТ РЕМОНТ
+
+7. ИЗВОДИ (35 реда)
+   - Механизъм на ПТП
+   - Технически причини
+   - Възможност за предотвратяване
+   - Виновно поведение
+
+8. ОТГОВОРИ НА ВЪПРОСИТЕ (60 реда)
+   - Всеки въпрос отделно
+   - Подробен отговор с числа
+   - Позоваване на изчисленията
+
+9. ЗАКЛЮЧИТЕЛНА ЧАСТ (5 реда)
+   - Дата, подпис: "Изготвил: инж. [Име]"
+
+Пишете ПОДРОБНО. Използвайте данните от ЕТАП 1 за консистентност.
+"""
+
+
 class ATEReportRequest(BaseModel):
     """Request model for ATE report generation."""
     # Can provide either processed result or raw text
@@ -1224,10 +1430,20 @@ async def generate_ate_report(request: ATEReportRequest):
                 damaged_parts.extend(vehicle.get("damaged_parts", []))
             logger.info(f"Damaged parts for labor query: {damaged_parts}")
 
-            # Get relevant ATE knowledge from RAG using dual-query approach
-            # This ensures we get both legal requirements (Naredba 24) and technical methodology (Uchebnik)
-            logger.info("Retrieving dual-source RAG context (Naredba 24 + Uchebnik)...")
-            ate_knowledge, sources = await get_dual_ate_context(raw_text[:1000], damaged_parts=damaged_parts)
+            # ===== TWO-STAGE GENERATION =====
+            # Stage 1: Sections 1-4 + Formulas 5.1-5.8 (~4k input, ~10k output)
+            # Stage 2: Formulas 5.9-5.15 + Sections 6-9 (~4k input, ~10k output)
+            # Total output: ~20k tokens = 6,500+ Bulgarian words
+
+            # Get MINIMAL RAG context (1+1+1 = 3 chunks instead of 3+3+2 = 8)
+            logger.info("Retrieving minimal RAG context for two-stage generation...")
+            ate_knowledge, sources = await get_dual_ate_context(
+                raw_text[:1000],
+                damaged_parts=damaged_parts,
+                naredba_limit=1,
+                uchebnik_limit=1,
+                court_limit=1
+            )
 
             # Build the expert questions section
             expert_questions = request.expert_questions or [
@@ -1238,7 +1454,6 @@ async def generate_ate_report(request: ATEReportRequest):
             ]
 
             # Prepare MINIMAL case data for report (only essential fields)
-            # This dramatically reduces tokens to leave room for output
             report_data = {
                 "claim_number": case_data.get("claim_number"),
                 "accident_date": case_data.get("accident_date"),
@@ -1263,7 +1478,6 @@ async def generate_ate_report(request: ATEReportRequest):
                         "damaged_parts": v.get("damaged_parts", []),
                         "current_market_value_bgn": v.get("current_market_value_bgn"),
                     }
-                    # Add parts summary (not full details)
                     if v.get("parts_estimate"):
                         pe = v["parts_estimate"]
                         vehicle_summary["repair_estimate"] = {
@@ -1273,322 +1487,85 @@ async def generate_ate_report(request: ATEReportRequest):
                         }
                     report_data["vehicles"].append(vehicle_summary)
 
-            # Include physics summary
             if case_data.get("physics_analysis"):
                 report_data["physics_analysis"] = case_data["physics_analysis"]
 
             report_data_json = json.dumps(report_data, indent=2, ensure_ascii=False, default=str)
-            logger.info(f"Report data size: {len(report_data_json)} chars (trimmed from full extraction)")
+            logger.info(f"Report data size: {len(report_data_json)} chars")
 
-            # Extract physics values for explicit injection (LLM tends to ignore nested JSON)
-            # Try both field naming conventions (PhysicsAnalysis vs raw physics service response)
+            # Extract physics values
             physics = report_data.get("physics_analysis", {})
-            speed_a = physics.get("vehicle_a_pre_impact_kmh") or physics.get("vehicle_a_impact_velocity_kmh") or "неизвестна"
-            speed_b = physics.get("vehicle_b_pre_impact_kmh") or physics.get("vehicle_b_impact_velocity_kmh") or "неизвестна"
-            delta_v = physics.get("delta_v_a_kmh") or "неизвестна"
-            physics_method = physics.get("physics_method") or physics.get("method") or "неизвестен"
+            physics_values = {
+                "speed_a": physics.get("vehicle_a_pre_impact_kmh") or physics.get("vehicle_a_impact_velocity_kmh") or "неизвестна",
+                "speed_b": physics.get("vehicle_b_pre_impact_kmh") or physics.get("vehicle_b_impact_velocity_kmh") or "неизвестна",
+                "delta_v": physics.get("delta_v_a_kmh") or "неизвестна",
+                "method": physics.get("physics_method") or physics.get("method") or "Momentum 360"
+            }
 
-            # Generate ATE report using LLM with RAG context
-            report_prompt = f"""/no_think
-Генерирайте професионална Автотехническа Експертиза (АТЕ) на български език.
-НЕ обяснявайте какво ще направите - директно напишете доклада.
-
-ВАЖНО ФОРМАТИРАНЕ:
-- НЕ използвайте LaTeX или $$...$$ за формули
-- Използвайте прост текст: V = √(2×μ×g×σ) = √(2×0.7×9.81×5.0) = 8.29 m/s
-- Използвайте Unicode символи: √ × ² ³ ≈ ≤ ≥ °
-- Пример: u = корен от (2 × 0.7 × 9.81 × 5.0) = 8.29 m/s = 29.8 km/h
-
-══════════════════════════════════════════════════════════════════════════════
-ИЗЧИСЛЕНИ СКОРОСТИ И ФОРМУЛИ (ЗАДЪЛЖИТЕЛНО ИЗПОЛЗВАЙТЕ И ПОКАЖЕТЕ В ДОКЛАДА):
-══════════════════════════════════════════════════════════════════════════════
-
-РЕЗУЛТАТИ:
-• МПС А преди удара: V₁ = {speed_a} км/ч
-• МПС Б преди удара: V₂ = {speed_b} км/ч
-• Промяна на скоростта: ΔV = {delta_v} км/ч
-• Метод: {physics_method}
-
-ВХОДНИ ДАННИ (покажете в доклада):
-• Маса МПС А: m₁ = 1400 kg
-• Маса МПС Б: m₂ = 1400 kg
-• Път на плъзгане след удара: σ = 5.0 m
-• Коефициент на триене (сух асфалт): μ = 0.7
-• Гравитационно ускорение: g = 9.81 m/s²
-
-ФОРМУЛИ И ИЗЧИСЛЕНИЯ (покажете стъпка по стъпка в доклада):
-1. Скорост след удара от пътя на плъзгане:
-   u = √(2·μ·g·σ) = √(2 × 0.7 × 9.81 × 5.0) = 8.29 m/s = 29.8 км/ч
-
-2. Закон за запазване на импулса (векторна форма):
-   m₁·V₁ + m₂·V₂ = m₁·u₁ + m₂·u₂
-
-3. Изчислена скорост преди удара:
-   V = {speed_a} км/ч (от momentum_360 анализ)
-
-ВНИМАНИЕ: НЕ използвайте скорости от свидетели - използвайте САМО горните изчислени стойности!
-══════════════════════════════════════════════════════════════════════════════
-
-РЕГУЛАТОРНИ И МЕТОДОЛОГИЧНИ РЕФЕРЕНЦИИ:
-{ate_knowledge}
-
-ДАННИ ЗА СЛУЧАЯ:
-{report_data_json}
-
-ВЪПРОСИ ЗА ОТГОВОР:
-{chr(10).join(f'{i+1}. {q}' for i, q in enumerate(expert_questions))}
-
-КРИТИЧНИ ИЗИСКВАНИЯ ЗА ТОЧНОСТ:
-
-1. СКОРОСТИ - МНОГО ВАЖНО:
-   Използвайте САМО стойностите от секция "physics_analysis":
-   - "vehicle_a_pre_impact_kmh" = скорост на МПС А преди удара
-   - "vehicle_b_pre_impact_kmh" = скорост на МПС Б преди удара
-   - "delta_v_kmh" = промяна на скоростта при удара
-   НИКОГА не използвайте скорости споменати в текста на документа - те са непроверени твърдения!
-
-2. ПРЕВОЗНИ СРЕДСТВА - задължително посочете:
-   - Марка, модел и година на производство
-   - Регистрационен номер
-   - VIN номер (ако е наличен)
-
-3. ФОРМУЛИ - в техническото изследване ЗАДЪЛЖИТЕЛНО цитирайте и обяснете:
-   - Скорост след удара (от пътя на плъзгане): u = √(2·μ·g·σ), където μ=0.7 (сух асфалт), g=9.81 m/s², σ=разстояние
-   - Закон за запазване на импулса: m₁V₁ + m₂V₂ = m₁u₁ + m₂u₂
-   - Векторно разлагане: V₁ₓ = (m₁u₁cos(β₁) + m₂u₂cos(β₂)) / m₁cos(α₁)
-   - Резултантна скорост: V = √(Vₓ² + Vᵧ²)
-   - ΔV (Delta-V) = |V - u| = промяна на скоростта при удара
-   - Покажете входни стойности: маси (kg), ъгли (°), разстояния (m)
-
-4. ЩЕТИ - МНОГО ВАЖНО - копирайте ТОЧНО повредите от "damage_description" за ВСЯКО превозно средство:
-   - За ВСЯКО МПС посочете повредите от неговия "damage_description" поле
-   - НЕ смесвайте повреди между превозните средства!
-   - Включете пазарна стойност от "current_market_value_bgn" (ако е налична)
-
-5. ТЕРМИНОЛОГИЯ:
-   - Използвайте "лента" (lane) НЕ "лоста"
-   - Използвайте "сменях лента" НЕ "сменях лоста"
-   - Правилно: "промяна на лента", "дясна лента", "лява лента"
-
-6. КАЛКУЛАЦИЯ НА ТРУД (ако има норматив в референциите):
-   - Часова ставка: {request.hourly_rate_bgn} лв/час (официален сервиз)
-   - Използвайте нормативите от Наредба 24 (часове по клас МПС)
-   - Класове: A (<4m), B (4-4.6m), C (>4.6m), Джип
-   - Формула: Труд = Норматив (часове) × {request.hourly_rate_bgn} лв/час
-   - Пример: Задна броня клас B = 1.8 часа × {request.hourly_rate_bgn} = {request.hourly_rate_bgn * 1.8:.0f} лв
-
-ЗАДЪЛЖИТЕЛНА СТРУКТУРА НА ДОКЛАДА (следвайте формата на съдебна експертиза):
-
-1. ЗАГЛАВНА ЧАСТ (10-15 реда)
-   - Заглавие: "АВТОТЕХНИЧЕСКА ЕКСПЕРТИЗА"
-   - Номер на дело/преписка
-   - Дата на изготвяне
-   - Възложител (съд/застраховател)
-
-2. ВЪВЕДЕНИЕ (20-30 реда)
-   - Основание за назначаване
-   - Задачи поставени на експерта
-   - Нормативна база: Наредба № 24 от 2019 г., ЗДвП, ЗЗД
-   - Използвани методи: Momentum 360, запазване на импулса
-
-3. ИЗСЛЕДВАНА ДОКУМЕНТАЦИЯ (15-25 реда)
-   - Подробен списък на всички изследвани документи
-   - Констативен протокол, декларации, снимки
-   - Медицински документи (ако има)
-
-4. ФАКТИЧЕСКА ОБСТАНОВКА (50-80 реда) - МНОГО ПОДРОБНО!
-   - Дата, час и място на ПТП
-   - Описание на пътя: широчина, настилка, маркировка, знаци
-   - Метеорологични условия: осветление, видимост, валежи
-   - ЗА ВСЯКО МПС подробно:
-     * Марка, модел, година, рег. номер, VIN
-     * Маса в kg
-     * Пазарна стойност в BGN
-     * Направление на движение
-     * Приблизителна скорост преди ПТП
-   - Хронология на събитията (стъпка по стъпка)
-   - Описание на удара и последствията
-
-5. ТЕХНИЧЕСКО ИЗСЛЕДВАНЕ (150-200 реда) - НАЙ-ВАЖНАТА СЕКЦИЯ! ВКЛЮЧЕТЕ ВСИЧКИ ФОРМУЛИ!
-
-   5.1 КОЕФИЦИЕНТ НА ТРИЕНЕ (μ):
-     * Обосновка на избраната стойност: μ = 0.7 (сух асфалт) / 0.5 (мокър) / 0.4 (чакъл) / 0.2 (сняг) / 0.1 (лед)
-     * Формула за триене: F = μ × N = μ × m × g
-     * Как е определен: визуален оглед / протокол / стандартни стойности
-
-   5.2 СКОРОСТ СЛЕД УДАРА (от спирачни следи):
-     * Формула [5]: u = √(2 × μ × g × σ)
-       - μ = коефициент на триене (безразмерен)
-       - g = 9.81 m/s² (земно ускорение)
-       - σ = дължина на спирачната следа (m)
-     * Изчисление стъпка по стъпка с реални числа
-     * Резултат: u = X.XX m/s = Y.YY km/h
-
-   5.3 ВЕКТОРНО РАЗЛАГАНЕ НА СКОРОСТТА:
-     * Формули за компоненти:
-       - Vx = V × cos(α) (хоризонтална компонента)
-       - Vy = V × sin(α) (вертикална компонента)
-     * Резултантна скорост: V = √(Vx² + Vy²)
-     * Ъгъл на движение: θ = arctan(Vy / Vx)
-     * Изчисления за всяко МПС
-
-   5.4 АНАЛИЗ ПО МЕТОДА MOMENTUM 360:
-     * Закон за запазване на импулса (векторен):
-       - X-компонента: m₁×V₁×cos(α₁) + m₂×V₂×cos(α₂) = m₁×u₁×cos(β₁) + m₂×u₂×cos(β₂)
-       - Y-компонента: m₁×V₁×sin(α₁) + m₂×V₂×sin(α₂) = m₁×u₁×sin(β₁) + m₂×u₂×sin(β₂)
-     * Входни данни: m₁, m₂ (kg), α₁, α₂ (преди), β₁, β₂ (след)
-     * Ъглова система: 0° = Изток, 90° = Север, 180° = Запад, 270° = Юг
-     * Изчислени скорости V₁ и V₂ преди удара
-
-   5.5 МАТРИЧЕН МЕТОД (Impact Theory):
-     * Система уравнения: [a₁₁ a₁₂; a₂₁ a₂₂] × [V₁; V₂] = [b₁; b₂]
-       - a₁₁ = cos(α₁) × m₁
-       - a₁₂ = cos(α₂) × m₂
-       - a₂₁ = -cos(α₁ - αs)
-       - a₂₂ = cos(α₂ - αs)
-       - b₁ = (cos(β₁) × m₁ × u₁) + (cos(β₂) × m₂ × u₂)
-       - b₂ = ((cos(β₂ - αs) × u₂) - (cos(β₁ - αs) × u₁)) / k
-     * Решение на матричната система
-
-   5.6 DELTA-V АНАЛИЗ (промяна на скоростта):
-     * Формула: ΔV = √(V² + u² - 2×V×u×cos(β - α))
-     * Или опростено: ΔV = |V - u| (при праволинейно движение)
-     * ΔV за МПС А = X.X km/h
-     * ΔV за МПС Б = Y.Y km/h
-     * Кинетична енергия на удара: E = ½ × m × ΔV²
-     * Оценка на тежестта: ΔV < 15 km/h (лек), 15-30 (среден), > 30 (тежък)
-
-   5.7 ОПАСНА ЗОНА И СПИРАЧЕН ПЪТ:
-     * Формула [11] за опасна зона: Sоз = V×(tr + tsp + 0.5×tn) + V²/(2×j)
-       - V = скорост (m/s)
-       - tr = време за реакция (1.0 s стандарт)
-       - tsp = време за задействане на спирачки (0.2 s)
-       - tn = време за нарастване на спирачната сила (0.0-0.3 s)
-       - j = забавяне при спиране (m/s²), j = μ × g
-     * Разстояние за реакция: Sr = V × tr
-     * Спирачен път: Ss = V² / (2 × μ × g)
-     * Общо: Sобщо = Sr + Ss
-
-   5.8 ВРЕМЕ ЗА СПИРАНЕ:
-     * Формула [13]: Tу = tr + tsp + 0.5×tn + (V - Vy)/j
-     * Общо време от момента на възприемане до пълен стоп
-     * Изчисление с реални стойности
-
-   5.9 БЕЗОПАСНА СКОРОСТ:
-     * Формула [16] за Vбезоп: квадратно уравнение
-     * При какво V водачът би могъл да спре навреме?
-     * Сравнение с действителната скорост
-
-   5.10 ВЪЗМОЖНОСТ ЗА ПРЕДОТВРАТЯВАНЕ:
-     * Сравнение: Sоз (опасна зона) vs. разстояние до обекта
-     * Ако Sоз > разстояние → НЕ е имал техническа възможност
-     * Ако Sоз < разстояние → ИМАЛ Е техническа възможност
-     * Времеви анализ: имал ли е достатъчно време?
-
-   5.11 АНАЛИЗ НА ЧУВСТВИТЕЛНОСТ (задължително!):
-     * Как се променя резултатът при различни стойности на μ:
-       - Ако μ = 0.65: V = X.X km/h
-       - Ако μ = 0.70: V = Y.Y km/h
-       - Ако μ = 0.75: V = Z.Z km/h
-     * Грешка на оценката: ±5% с 95% доверителен интервал
-
-   5.12 КОЕФИЦИЕНТ НА ВЪЗСТАНОВЯВАНЕ (k):
-     * Определение: k = (u₂ - u₁) / (V₁ - V₂) - отношение на скоростите след и преди удара
-     * Таблица от учебника (челен удар в неподвижна преграда):
-       - 12-16 km/h: k = 0.24
-       - 23-25 km/h: k = 0.16
-       - 40-41 km/h: k = 0.13
-       - 46-49 km/h: k = 0.14
-       - 55-57 km/h: k = 0.12
-     * При идеално пластичен удар: k = 0 (МПС не се разделят)
-     * При еластопластичен удар: k = 0.1-0.2
-     * Използвана стойност в изчисленията: k = X.XX
-
-   5.13 ЕНЕРГИЕН БАЛАНС НА УДАРА:
-     * Кинетична енергия ПРЕДИ удара:
-       - МПС А: E₁ₐ = ½ × m₁ × V₁² = ½ × XXXX × (XX.X)² = XXXXX J
-       - МПС Б: E₁ᵦ = ½ × m₂ × V₂² = ½ × XXXX × (XX.X)² = XXXXX J
-       - Общо преди: E₁ = E₁ₐ + E₁ᵦ = XXXXX J
-     * Кинетична енергия СЛЕД удара:
-       - МПС А: E₂ₐ = ½ × m₁ × u₁² = ½ × XXXX × (XX.X)² = XXXXX J
-       - МПС Б: E₂ᵦ = ½ × m₂ × u₂² = ½ × XXXX × (XX.X)² = XXXXX J
-       - Общо след: E₂ = E₂ₐ + E₂ᵦ = XXXXX J
-
-   5.14 ДИСИПИРАНА ЕНЕРГИЯ (поглътена при деформация):
-     * Формула: ΔE = E₁ - E₂ = XXXXX - XXXXX = XXXXX J
-     * Процент загуба: (ΔE / E₁) × 100 = XX.X%
-     * Тази енергия е изразходвана за:
-       - Пластична деформация на каросериите
-       - Топлина от триене
-       - Звук при удара
-     * Проверка: при напълно пластичен удар загубата е 40-70%
-
-   5.15 РАБОТА НА СПИРАЧНИТЕ СИЛИ:
-     * Теорема за работата и енергията: W = F × d = μ × m × g × s
-     * За МПС А: Wₐ = μ × m₁ × g × σ₁ = 0.7 × XXXX × 9.81 × XX = XXXXX J
-     * За МПС Б: Wᵦ = μ × m₂ × g × σ₂ = 0.7 × XXXX × 9.81 × XX = XXXXX J
-     * Проверка: W ≈ ½ × m × u² (енергията се превръща в работа на триене)
-
-6. ОЦЕНКА НА ЩЕТИТЕ (30-50 реда) - по Наредба 24
-   - ЗА ВСЯКО МПС:
-     * Списък повредени части
-     * Стойност на частите (от скрапиране)
-     * Коефициент на овехтяване (по възраст)
-     * Труд за подмяна (часове × ставка)
-     * Боядисване (ако е приложимо)
-     * Обща стойност на ремонта
-
-7. ИЗВОДИ (30-40 реда)
-   - Механизъм на ПТП (обобщение)
-   - Технически причини
-   - Възможност за предотвратяване
-   - Виновно поведение (ако се установява)
-
-8. ОТГОВОРИ НА ВЪПРОСИТЕ (50-80 реда)
-   - Всеки въпрос на отделен параграф
-   - Подробен отговор с конкретни числа
-   - Позоваване на изчисленията от техническото изследване
-
-9. ЗАКЛЮЧИТЕЛНА ЧАСТ (5-10 реда)
-   - Дата
-   - Подпис на експерта
-   - "Изготвил: инж. [Име]"
-
-ОБЩО: Минимум 3000 думи (8-12 страници). Пишете подробно като истинска съдебна експертиза!
-
-ВАЖНО: Директно генерирайте доклада. Не описвайте какво ще направите. Върнете САМО текста на доклада.
-"""
-
-            # Estimate input tokens conservatively (Cyrillic ~1.5 chars/token with Qwen - very conservative)
-            prompt_chars = len(report_prompt) + 200  # +200 for system prompt
-            estimated_input_tokens = int(prompt_chars / 1.5)  # Conservative estimate for Cyrillic
-
-            # Calculate max_tokens to stay within 16k context
-            # Court expertises are 2,500-10,000 words - we need as many tokens as possible
-            max_context = 16384
-            available_tokens = max_context - estimated_input_tokens - 500  # 500 token safety buffer
-            max_output_tokens = min(6000, max(3000, available_tokens))  # Between 3000-6000 for detailed report
-
-            logger.info(f"Report generation: ~{estimated_input_tokens} input tokens, {max_output_tokens} max output")
-
-            response = await llm_client.chat.completions.create(
-                model=LLM_MODEL,
-                messages=[
-                    {"role": "system", "content": "Вие сте сертифициран автотехнически експерт. Генерирате директно доклади без обяснения."},
-                    {"role": "user", "content": report_prompt}
-                ],
-                temperature=0.3,
-                max_tokens=max_output_tokens
+            # ===== STAGE 1: Sections 1-4 + Formulas 5.1-5.8 =====
+            logger.info("STAGE 1: Generating sections 1-4 + formulas 5.1-5.8...")
+            stage1_prompt = build_stage1_prompt(
+                report_data_json=report_data_json,
+                ate_knowledge=ate_knowledge,
+                physics_values=physics_values,
+                hourly_rate=request.hourly_rate_bgn
             )
 
-            content = response.choices[0].message.content
-            if not content:
-                raise HTTPException(status_code=500, detail="LLM returned empty response")
+            # Target: ~4k input, ~10k output (1/4 : 3/4 ratio)
+            stage1_chars = len(stage1_prompt) + 200
+            stage1_input_tokens = int(stage1_chars / 1.5)
+            logger.info(f"Stage 1: ~{stage1_input_tokens} input tokens, 10000 max output")
 
-            # Plain text response - clean up Qwen's think tags
-            report_text = content.strip()
-            # Remove <think>...</think> tags that Qwen sometimes adds despite /no_think
-            report_text = re.sub(r'<think>[\s\S]*?</think>\s*', '', report_text)
+            stage1_response = await llm_client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "Вие сте сертифициран автотехнически експерт."},
+                    {"role": "user", "content": stage1_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=10000
+            )
+
+            stage1_text = stage1_response.choices[0].message.content or ""
+            stage1_text = re.sub(r'<think>[\s\S]*?</think>\s*', '', stage1_text).strip()
+            logger.info(f"Stage 1 complete: {len(stage1_text)} chars")
+
+            # Extract summary from Stage 1 for context in Stage 2
+            # Take last 500 chars as summary (end of technical analysis)
+            stage1_summary = stage1_text[-1500:] if len(stage1_text) > 1500 else stage1_text
+
+            # ===== STAGE 2: Formulas 5.9-5.15 + Sections 6-9 =====
+            logger.info("STAGE 2: Generating formulas 5.9-5.15 + sections 6-9...")
+            stage2_prompt = build_stage2_prompt(
+                report_data_json=report_data_json,
+                ate_knowledge=ate_knowledge,
+                physics_values=physics_values,
+                expert_questions=expert_questions,
+                hourly_rate=request.hourly_rate_bgn,
+                stage1_summary=stage1_summary
+            )
+
+            stage2_chars = len(stage2_prompt) + 200
+            stage2_input_tokens = int(stage2_chars / 1.5)
+            logger.info(f"Stage 2: ~{stage2_input_tokens} input tokens, 10000 max output")
+
+            stage2_response = await llm_client.chat.completions.create(
+                model=LLM_MODEL,
+                messages=[
+                    {"role": "system", "content": "Вие сте сертифициран автотехнически експерт."},
+                    {"role": "user", "content": stage2_prompt}
+                ],
+                temperature=0.3,
+                max_tokens=10000
+            )
+
+            stage2_text = stage2_response.choices[0].message.content or ""
+            stage2_text = re.sub(r'<think>[\s\S]*?</think>\s*', '', stage2_text).strip()
+            logger.info(f"Stage 2 complete: {len(stage2_text)} chars")
+
+            # ===== COMBINE STAGES =====
+            report_text = stage1_text + "\n\n" + stage2_text
+            logger.info(f"Combined report: {len(report_text)} chars (~{len(report_text.split())} words)")
 
             processing_time = time.time() - start_time
 
