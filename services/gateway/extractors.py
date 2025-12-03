@@ -91,6 +91,8 @@ Extract the following information and return as valid JSON:
 }}
 
 Important instructions:
+
+=== GENERAL RULES ===
 1. All monetary amounts must be in Bulgarian Lev (BGN)
 2. Dates must be in ISO format (YYYY-MM-DD)
 3. Translate Bulgarian text to English in the response
@@ -99,49 +101,54 @@ Important instructions:
 6. Be conservative with confidence_score - lower if document is unclear
 7. Extract actual values from the document, do not make up information
 8. Return ONLY the JSON object, no additional text
-9. For physics angles (α, β, αs): 0° = East/right, 90° = North/up, 180° = West/left, 270° = South/down
-10. pre_impact_angle_deg (α) = direction vehicle was traveling BEFORE collision
-11. post_impact_angle_deg (β) = direction vehicle traveled AFTER collision
-12. If angles are described as "heading north" use 90°, "heading east" use 0°, etc.
-13. For head-on collisions: vehicle 1 α≈0°, vehicle 2 α≈180° typically
-14. IMPORTANT: Always extract VIN if present - it is exactly 17 characters (e.g. WVWZZZ1KZAW123456)
-15. VIN may appear as "VIN:", "Рама №", "Шаси №" in documents - ALWAYS include it if found
-16. IMPORTANT: Always extract damaged_parts as a list - parse damage description into individual parts
-17. CRITICAL: Each vehicle MUST have a UNIQUE VIN - NEVER assign the same VIN to multiple vehicles!
-18. CRITICAL: Each vehicle has its own registration number - extract EACH vehicle's registration separately
-19. Look for vehicle data in separate sections/blocks - match VIN, registration, make, model, year to the correct vehicle
-20. If a vehicle is missing data, use null - do NOT copy data from another vehicle
-21. CRITICAL FOR DAMAGES: In Bulgarian protocols, vehicle A (МПС А) and vehicle B (МПС Б) have SEPARATE damage sections
+
+=== VEHICLE DATA - CRITICAL ===
+9. Each vehicle MUST have UNIQUE data - NEVER duplicate VINs, registrations, or other data between vehicles:
+   - Look for vehicle data in separate sections: "ПРЕВОЗНО СРЕДСТВО А" and "ПРЕВОЗНО СРЕДСТВО Б"
+   - Match VIN, registration, make, model, year to the CORRECT vehicle
+   - If a vehicle is missing data, use null - do NOT copy from another vehicle
+
+10. VIN extraction: exactly 17 characters, may appear as "VIN:", "Рама №", "Шаси №"
+    Example: WVWZZZ1KZAW123456
+
+11. Extract damaged_parts as a list - parse damage description into individual parts
+
+=== DAMAGE SEPARATION - CRITICAL ===
+12. Vehicle A (МПС А) and Vehicle B (МПС Б) have SEPARATE damage sections:
     - Look for "ВИДИМИ ЩЕТИ" or "ПОВРЕДИ" under EACH vehicle's section
-    - Vehicle A's damages are listed ONLY under "ПРЕВОЗНО СРЕДСТВО А" section
-    - Vehicle B's damages are listed ONLY under "ПРЕВОЗНО СРЕДСТВО Б" section
     - DO NOT mix or swap damages between vehicles!
-    - If vehicle A hit vehicle B, A's damage is typically FRONT, B's damage is typically REAR/SIDE
-22. In lane-change accidents: the vehicle changing lanes (at fault) hits with its FRONT, victim is hit on SIDE/REAR
-23. CRITICAL FOR PHYSICS - extract these values for accurate speed reconstruction:
-    - skid_distance_m: "Спирачна следа: X метра" or "спирачни следи X м" → extract X
-    - post_impact_travel_m: "След удара се премества на X метра" or "се отмества на X м" or "изминава X м след удара" → extract X
-    - This is the distance σ (sigma) the vehicle traveled AFTER the collision before stopping
-24. CRITICAL FOR ANGLES - convert directions to degrees:
-    - "от центъра към X" or "heading East/right" → pre_impact_angle_deg: 0
-    - "heading North/up" → pre_impact_angle_deg: 90
-    - "heading West/left" → pre_impact_angle_deg: 180
-    - "heading South/down" → pre_impact_angle_deg: 270
-    - "завиващ наляво" (turning left) from eastbound → post_impact_angle_deg: 45-90
-    - If vehicle was going straight and hit → post_impact_angle_deg ≈ pre_impact_angle_deg
-    - If vehicle spun after impact → estimate post_impact_angle_deg based on final position
-25. Look for these Bulgarian physics terms:
-    - "Спирачна следа" = skid marks (before impact)
-    - "След удара се премества/отмества" = post-impact travel distance
-    - "коефициент на сцепление" or "μ" = friction coefficient
-    - "Маса" or "тегло" = mass in kg
-26. CRITICAL FOR COLLISION TYPE - determine from description:
-    - "завиващ наляво" or "ляв завой" or "предприема завой наляво" → collision_type: "left_turn"
-    - "завиващ надясно" or "десен завой" → collision_type: "right_turn"
-    - "челен удар" or "насрещна лента" → collision_type: "head_on"
-    - "удар отзад" or "настига" → collision_type: "rear_end"
-    - "смяна на лента" or "изпреварва" → collision_type: "side_impact"
-    - "кръстовище" with perpendicular paths → collision_type: "perpendicular"
+    - Typical pattern: if A hits B, A's damage is FRONT, B's damage is REAR/SIDE
+    - Lane-change: vehicle changing lanes hits with FRONT, victim hit on SIDE/REAR
+
+=== PHYSICS DATA EXTRACTION - CRITICAL ===
+13. Extract these values for speed reconstruction:
+    - skid_distance_m: "Спирачна следа: X метра" → extract X (distance BEFORE impact)
+    - post_impact_travel_m: "След удара се премества на X метра" or "се отмества на X м" → extract X
+      This is σ (sigma) - distance traveled AFTER collision before stopping
+    - mass_kg: "Маса" or "тегло" → extract in kg
+    - "коефициент на сцепление" or "μ" → friction coefficient for road_surface
+
+=== ANGLES - PHYSICS COORDINATE SYSTEM ===
+14. Angle convention: 0° = East/right, 90° = North/up, 180° = West/left, 270° = South/down
+    - pre_impact_angle_deg (α) = direction BEFORE collision
+    - post_impact_angle_deg (β) = direction AFTER collision
+    Convert directions:
+    - "от центъра към Младост" / "heading East" → 0°
+    - "heading North" → 90°
+    - "heading West" / "от Младост към центъра" → 180°
+    - "heading South" → 270°
+    - "завиващ наляво" (turning left) from eastbound → post_impact: 45-90°
+    - Head-on: vehicle 1 α≈0°, vehicle 2 α≈180°
+    - If went straight and hit → post ≈ pre angle
+
+=== COLLISION TYPE DETECTION ===
+15. Determine collision_type from Bulgarian description:
+    - "завиващ наляво" / "ляв завой" / "предприема завой наляво" → "left_turn"
+    - "завиващ надясно" / "десен завой" → "right_turn"
+    - "челен удар" / "насрещна лента" → "head_on"
+    - "удар отзад" / "настига" → "rear_end"
+    - "смяна на лента" / "изпреварва" → "side_impact"
+    - "кръстовище" with perpendicular paths → "perpendicular"
 
 JSON Response:"""
 
