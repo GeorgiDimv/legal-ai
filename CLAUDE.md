@@ -167,7 +167,28 @@ Key variables configured in `.env` (copy from `.env.example`):
 
 ## Physics Service (v2.0.0)
 
-The physics service provides crash reconstruction based on Bulgarian methodology from the "l.xlsx" formulas:
+The physics service provides crash reconstruction based on Bulgarian methodology from the "l.xlsx" formulas.
+
+**Full documentation:** `docs/physics-formulas.md`
+
+### 15 Formulas for ATE Reports
+
+| # | Formula | Description |
+|---|---------|-------------|
+| 1 | `F = μ × m × g` | Friction force |
+| 2 | `u = √(2×μ×g×σ)` | Post-impact velocity from skid |
+| 3 | `Vx = V×cos(α)` | Velocity X-component |
+| 4 | `V = √(Vx² + Vy²)` | Resultant velocity |
+| 5-6 | Momentum X, Y | Conservation of momentum (vector) |
+| 7 | Matrix method | Impact Theory solution |
+| 8 | `ΔV = √(V² + u² - 2Vu×cos(β-α))` | Delta-V |
+| 9 | `Sоз = V×(tr+tsp+0.5tn) + V²/(2j)` | Dangerous zone |
+| 10 | `Tу` formula | Stopping time |
+| 11 | `Vбезоп` | Safe speed (quadratic) |
+| 12 | `k = (u₂-u₁)/(V₁-V₂)` | Restitution coefficient |
+| 13 | `E = ½×m×V²` | Kinetic energy |
+| 14 | `ΔE = E₁ - E₂` | Dissipated energy |
+| 15 | `W = μ×m×g×s` | Work of braking forces |
 
 ### Endpoints
 
@@ -175,23 +196,18 @@ The physics service provides crash reconstruction based on Bulgarian methodology
 |----------|-------------|
 | `POST /velocity-from-skid` | Calculate pre-braking speed from skid mark length |
 | `POST /momentum-360` | Full 360° momentum analysis with angular vectors |
-| `POST /impact-energy` | Calculate impact energy, delta-V, and damage severity |
+| `POST /dangerous-zone` | Calculate stopping distance, time, safe speed |
 | `POST /validate-claimed-speed` | Validate driver's claimed speed against physical evidence |
 | `GET /formulas` | Returns all physics formulas and friction coefficients |
 
-### Momentum 360 Analysis
+### Future Formulas (not yet implemented)
 
-Uses angular momentum conservation for two-vehicle collisions:
-- **Input**: Vehicle masses, post-impact speeds, pre/post impact angles (α, β)
-- **Output**: Pre-impact velocities (V1, V2), delta-V, impact energy
-- **Angles**: 0° = East, 90° = North, 180° = West, 270° = South
+| Formula | Use Case | Needed Data |
+|---------|----------|-------------|
+| Pedestrian throw | Pedestrian accidents | `throw_distance_m` from protocol |
+| EES deformation | When crush depth available | `crush_depth_cm` from inspection |
 
-Key formulas:
-```
-V1x = (m1*V1'*cos(β1) + m2*V2'*cos(β2)) / m1*cos(α1)
-V1y = (m1*V1'*sin(β1) + m2*V2'*sin(β2)) / m1*sin(α1)
-V1 = sqrt(V1x² + V1y²)
-```
+See `docs/physics-formulas.md` for implementation details.
 
 ## Car Value Service (v4.0.0)
 
@@ -571,3 +587,4 @@ The `/generate-ate-report` endpoint uses 2 sequential LLM calls:
 ## Documentation
 
 - `docs/naredba24-implementation-status.md`: Full Naredba 24 compliance status and gaps
+- `docs/physics-formulas.md`: All 15 physics formulas for ATE reports + future implementation roadmap
