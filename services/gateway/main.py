@@ -1450,15 +1450,15 @@ async def generate_ate_report(request: ATEReportRequest):
 ВАЖНО: Директно генерирайте доклада. Не описвайте какво ще направите. Върнете САМО текста на доклада.
 """
 
-            # Estimate input tokens conservatively (Cyrillic ~2.5 chars/token with Qwen)
-            prompt_chars = len(report_prompt) + 150  # +150 for system prompt
-            estimated_input_tokens = int(prompt_chars / 2.5)  # Conservative estimate
+            # Estimate input tokens conservatively (Cyrillic ~1.5 chars/token with Qwen - very conservative)
+            prompt_chars = len(report_prompt) + 200  # +200 for system prompt
+            estimated_input_tokens = int(prompt_chars / 1.5)  # Conservative estimate for Cyrillic
 
             # Calculate max_tokens to stay within 16k context
-            # Court expertises are 2,500-10,000 words - we need 8000+ tokens for detailed reports
+            # Court expertises are 2,500-10,000 words - we need as many tokens as possible
             max_context = 16384
-            available_tokens = max_context - estimated_input_tokens - 300  # 300 token safety buffer
-            max_output_tokens = min(8000, max(4000, available_tokens))  # Between 4000-8000 for detailed report
+            available_tokens = max_context - estimated_input_tokens - 500  # 500 token safety buffer
+            max_output_tokens = min(6000, max(3000, available_tokens))  # Between 3000-6000 for detailed report
 
             logger.info(f"Report generation: ~{estimated_input_tokens} input tokens, {max_output_tokens} max output")
 
