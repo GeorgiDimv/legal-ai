@@ -118,6 +118,23 @@ Important instructions:
     - DO NOT mix or swap damages between vehicles!
     - If vehicle A hit vehicle B, A's damage is typically FRONT, B's damage is typically REAR/SIDE
 22. In lane-change accidents: the vehicle changing lanes (at fault) hits with its FRONT, victim is hit on SIDE/REAR
+23. CRITICAL FOR PHYSICS - extract these values for accurate speed reconstruction:
+    - skid_distance_m: "Спирачна следа: X метра" or "спирачни следи X м" → extract X
+    - post_impact_travel_m: "След удара се премества на X метра" or "се отмества на X м" or "изминава X м след удара" → extract X
+    - This is the distance σ (sigma) the vehicle traveled AFTER the collision before stopping
+24. CRITICAL FOR ANGLES - convert directions to degrees:
+    - "от центъра към X" or "heading East/right" → pre_impact_angle_deg: 0
+    - "heading North/up" → pre_impact_angle_deg: 90
+    - "heading West/left" → pre_impact_angle_deg: 180
+    - "heading South/down" → pre_impact_angle_deg: 270
+    - "завиващ наляво" (turning left) from eastbound → post_impact_angle_deg: 45-90
+    - If vehicle was going straight and hit → post_impact_angle_deg ≈ pre_impact_angle_deg
+    - If vehicle spun after impact → estimate post_impact_angle_deg based on final position
+25. Look for these Bulgarian physics terms:
+    - "Спирачна следа" = skid marks (before impact)
+    - "След удара се премества/отмества" = post-impact travel distance
+    - "коефициент на сцепление" or "μ" = friction coefficient
+    - "Маса" or "тегло" = mass in kg
 
 JSON Response:"""
 

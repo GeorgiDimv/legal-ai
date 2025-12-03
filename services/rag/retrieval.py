@@ -136,7 +136,7 @@ class QdrantRetriever:
         Args:
             query: Search query text
             limit: Maximum results to return
-            document_filter: Filter by document type ("naredba_24" or "uchebnik_ate")
+            document_filter: Filter by document type (naredba_24, uchebnik_ate, or court_expertise)
             chunk_type_filter: Filter by chunk types
             score_threshold: Minimum similarity score
 
